@@ -57,11 +57,18 @@ SECTION_LABELS = [
 # 登录
 # ============================================================
 
+def _log(msg):
+    """写入运行日志（stdout 由 start_all.sh 重定向到 logs/admin.log），
+    供后台「日志查看」追溯关键操作。flush=True 避免块缓冲导致日志滞后。"""
+    print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] [admin] {msg}", flush=True)
+
+
 def do_login(password: str):
     """校验密码，成功后显示管理面板并载入当前配置。
     密码错误时返回页面内错误提示，不抛出 gr.Error，避免必须刷新页面。"""
     cfg = load_config()
     if hash_password(password) != cfg["admin_password_sha256"]:
+        _log("登录失败：密码错误")
         # 保持登录框可见，其他组件不更新，仅在 login_msg 显示错误
         return (
             gr.update(), gr.update(),
@@ -77,6 +84,7 @@ def do_login(password: str):
         )
     d = cfg["defaults"]
     sw = cfg["switches"]
+    _log("登录成功")
     return (
         gr.update(visible=False),          # 隐藏登录框
         gr.update(visible=True),           # 显示管理面板
@@ -136,6 +144,7 @@ def _restore_login(login_state):
 
 def do_logout():
     """退出登录：清除登录状态，返回登录页。"""
+    _log("退出登录")
     return (
         gr.update(visible=True),           # 显示登录框
         gr.update(visible=False),          # 隐藏管理面板
@@ -198,6 +207,7 @@ def save_switches(master, web, mcp, logged_in):
         "mcp": bool(mcp),
     }
     save_config(cfg)
+    _log(f"服务开关已保存：scan_service={bool(master)} web_ui={bool(web)} mcp={bool(mcp)}")
     msg = "✅ 已保存，即时生效（无需重启任何服务）。"
     if master and not (web or mcp):
         msg += "\n\n⚠️ 注意：两个子开关都关着，总开关虽开但没有任何可用入口。"
@@ -271,6 +281,8 @@ def save_defaults(api_url, timeout, orientation, unwarping, seal, chart,
         if key not in cfg["defaults"]:
             cfg["defaults"][key] = default_val
     save_config(cfg)
+    _log(f"默认设置已保存：api_url={cfg['api_url']} timeout={cfg['timeout']} "
+         f"vl_precision={cfg['defaults']['vl_precision']}")
     return "✅ 已保存。用户网页【刷新页面】后按新默认值显示；API 地址与超时立即生效。"
 
 
@@ -345,8 +357,10 @@ def switch_vl_model(precision, logged_in):
         return gr.update(), rollback
 
     # 1) 检查是否有扫描正在进行
+    _log(f"请求切换 VL 精度：{current} → {precision}")
     st = read_status()
     if st["state"] == "busy":
+        _log("切换被拒绝：当前有扫描任务进行中")
         return (
             "⚠️ **切换失败**：当前有扫描任务正在处理中（"
             f"`{st.get('file', '未知')}`），请等待扫描完成后再切换模型。",
@@ -363,6 +377,7 @@ def switch_vl_model(precision, logged_in):
         )
         if result.returncode != 0:
             err = (result.stderr or result.stdout or "").strip()
+            _log(f"VL 模型准备失败（{precision}）")
             return (
                 "❌ **模型准备失败**（当前运行的模型不受影响）。\n\n"
                 f"```\n{err[-800:]}\n```",
@@ -402,7 +417,17 @@ def switch_vl_model(precision, logged_in):
         )
         if result.returncode != 0:
             err = result.stderr.strip() or result.stdout.strip()
-            return f"❌ 启动新模型失败：{err[:300]}", rollback
+            # 旧服务已在上方停止：尽力恢复原精度，避免扫描服务整体中断
+            back = subprocess.run(
+                ["bash", str(script), str(current)],
+                capture_output=True, text=True, timeout=120,
+                cwd=str(BASE_DIR),
+            )
+            note = ("已自动恢复原精度模型服务。" if back.returncode == 0
+                    else "⚠️ 自动恢复原精度服务也失败，请查看日志后手动执行 start_all.sh。")
+            _log(f"启动 {precision} 失败：{err[:120]}；自动恢复原精度"
+                 f"{'成功' if back.returncode == 0 else '失败'}")
+            return f"❌ 启动新模型失败：{err[:300]}\n\n{note}", rollback
     except Exception as e:
         return f"❌ 启动新模型超时或异常：{e}", rollback
 
@@ -412,6 +437,7 @@ def switch_vl_model(precision, logged_in):
     save_config(cfg)
 
     label = dict(VL_PRECISION_CHOICES).get(precision, precision)
+    _log(f"VL 精度已切换：{current} → {precision}，llama-server 已重启")
     return (
         f"✅ 已切换至 **{label.split('—')[0].strip()}**，"
         f"llama-server 已重启，模型加载完成后扫描服务自动恢复。",
@@ -427,16 +453,23 @@ def check_status(logged_in):
     base = cfg["api_url"].rsplit("/", 1)[0]
 
     # --- API 服务 ---
+    # 探活用 /health（2xx 视为在线）；根路径 / 对 paddlex serve 恒返 404，不能作为存活判据
     try:
-        r = requests.get(base + "/", timeout=5)
-        api_txt = f"✅ 在线（HTTP {r.status_code}）— {base}"
+        r = requests.get(base + "/health", timeout=5)
+        if r.status_code < 400:
+            api_txt = f"✅ 在线（HTTP {r.status_code}）— {base}"
+        else:
+            api_txt = f"⚠️ 响应异常（HTTP {r.status_code}）— {base}"
     except Exception as e:
         api_txt = f"❌ 不可达 — {base}（{e}）"
 
     # --- VL 模型（llama-server）---
     try:
         r2 = requests.get("http://127.0.0.1:8081/health", timeout=3)
-        vl_txt = f"✅ 在线（HTTP {r2.status_code}）"
+        if r2.status_code < 400:
+            vl_txt = f"✅ 在线（HTTP {r2.status_code}）"
+        else:
+            vl_txt = f"⚠️ 响应异常（HTTP {r2.status_code}）"
     except Exception:
         vl_txt = "❌ 不可达（llama-server 未运行或加载中）"
 
@@ -557,6 +590,7 @@ def change_password(old_pw, new_pw1, new_pw2, logged_in):
     _require_login(logged_in)
     cfg = load_config()
     if hash_password(old_pw) != cfg["admin_password_sha256"]:
+        _log("修改密码失败：当前密码错误")
         raise gr.Error("当前密码错误")
     if not new_pw1 or len(new_pw1) < 6:
         raise gr.Error("新密码至少 6 位")
@@ -564,6 +598,7 @@ def change_password(old_pw, new_pw1, new_pw2, logged_in):
         raise gr.Error("两次输入的新密码不一致")
     cfg["admin_password_sha256"] = hash_password(new_pw1)
     save_config(cfg)
+    _log("管理密码已修改")
     return "✅ 密码已更新，下次登录生效"
 
 
@@ -742,7 +777,8 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
                                 info="将识别出的图表区域单独导出为图片文件")
                         with gr.Row():
                             d_max_pixels = gr.Slider(0, 4000000, step=100000,
-                                                     label="单图最大像素默认值（0 = 不限制）")
+                                                     label="单图最大像素默认值（0 = 不限制）",
+                                                     info="当前 llama-cpp-server 后端不支持此参数（仅 vllm-server 生效）")
                         gr.Markdown("**VLM 推理（点击圆点切换 VL 模型精度）**")
                         with gr.Row():
                             vl_precision = gr.Radio(
@@ -908,6 +944,8 @@ if __name__ == "__main__":
 })();
 </script>"""
     app.queue(max_size=8)
+    _log(f"管理后台启动：{os.environ.get('ADMIN_SERVER_NAME', '0.0.0.0')}"
+         f":{os.environ.get('ADMIN_SERVER_PORT', '7861')}")
     app.launch(
         server_name=os.environ.get("ADMIN_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("ADMIN_SERVER_PORT", "7861")),

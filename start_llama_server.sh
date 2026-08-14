@@ -49,15 +49,25 @@ MODEL="$MODEL_DIR/$MODEL_FILE"
 mkdir -p "$PROJECT_DIR/logs"
 
 # 按需下载官方模型并转换 / 量化到所选精度（已存在则秒级跳过，不删除其它精度文件）
-if command -v python >/dev/null 2>&1; then
-    python "$PROJECT_DIR/model_manager.py" ensure-vl --precision "$PRECISION_NORM" || {
-        echo "错误：VL 模型准备失败，请查看上方输出后重试。"
-        exit 1
-    }
+# Python 探测顺序与 start_all.sh 保持一致：显式 VENV_PATH > PATH 上的 python
+# > 默认 venv > 系统 python3（admin 热切换等场景下 venv 可能未激活，python 不在 PATH）
+PY=""
+if [ -n "${VENV_PATH:-}" ] && [ -x "$VENV_PATH/bin/python" ]; then
+    PY="$VENV_PATH/bin/python"
+elif command -v python >/dev/null 2>&1; then
+    PY="python"
+elif [ -x "$HOME/.venv_paddleocr/bin/python" ]; then
+    PY="$HOME/.venv_paddleocr/bin/python"
+elif command -v python3 >/dev/null 2>&1; then
+    PY="python3"
 else
-    echo "错误：未找到 python，无法自动准备 VL 模型。"
+    echo "错误：未找到可用的 Python 解释器（python / python3 / ~/.venv_paddleocr），无法自动准备 VL 模型。"
     exit 1
 fi
+"$PY" "$PROJECT_DIR/model_manager.py" ensure-vl --precision "$PRECISION_NORM" || {
+    echo "错误：VL 模型准备失败，请查看上方输出后重试。"
+    exit 1
+}
 
 if [ ! -x "$LLAMA_BIN" ]; then
     echo "错误：未找到 CUDA 版 llama-server（$LLAMA_BIN），请先完成 CUDA 编译。"
@@ -74,9 +84,26 @@ if [ -f "$PROJECT_DIR/llama.pid" ] && kill -0 "$(cat "$PROJECT_DIR/llama.pid")" 
     exit 0
 fi
 
-# CUDA 运行时库（持久化安装，避免 /tmp 被清理后符号链接失效）
-export CUDA_HOME=/home/lx/.local/share/cuda-12.4
-export LD_LIBRARY_PATH="/home/lx/.local/share/cuda-runtime/lib:$CUDA_HOME/lib64:${LD_LIBRARY_PATH:-}"
+# CUDA 运行时库路径：
+#   - Docker 内：/usr/local/cuda（nvidia/cuda 镜像标准路径，ldconfig 已注册）
+#   - 宿主机：可能装在自定义位置（如 ~/.local/share/cuda-12.4）
+# 优先使用环境变量 CUDA_HOME，其次自动探测标准位置，最后回退宿主兼容目录。
+if [ -z "${CUDA_HOME:-}" ]; then
+    if [ -d /usr/local/cuda/lib64 ]; then
+        CUDA_HOME=/usr/local/cuda
+    elif [ -d "$HOME/.local/share/cuda-12.4/lib64" ]; then
+        CUDA_HOME="$HOME/.local/share/cuda-12.4"
+    fi
+fi
+if [ -n "${CUDA_HOME:-}" ] && [ -d "$CUDA_HOME/lib64" ]; then
+    export CUDA_HOME
+    _cuda_lib="$CUDA_HOME/lib64"
+    # 宿主兼容：部分 CUDA 运行时库放在独立目录
+    if [ -d "$HOME/.local/share/cuda-runtime/lib" ]; then
+        _cuda_lib="$HOME/.local/share/cuda-runtime/lib:$_cuda_lib"
+    fi
+    export LD_LIBRARY_PATH="$_cuda_lib:${LD_LIBRARY_PATH:-}"
+fi
 
 echo "启动 llama-server（$PRECISION_LABEL，端口 $PORT）..."
 nohup "$LLAMA_BIN" \

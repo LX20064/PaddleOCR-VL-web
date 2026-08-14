@@ -7,10 +7,15 @@
 set -e
 
 PROJECT_DIR="$(cd "$(dirname "$0")" && pwd)"
-VENV_PATH="${VENV_PATH:-$HOME/.venv_paddleocr}"
 PIPELINE_CONFIG="$PROJECT_DIR/PaddleOCR-VL.yaml"
 
-source "$VENV_PATH/bin/activate"
+# Python 环境：Docker 内直接用系统 Python（无 venv）；宿主机按需激活 venv。
+# 可用 VENV_PATH 显式指定，未指定则回退 ~/.venv_paddleocr（存在才激活）。
+if [ -n "${VENV_PATH:-}" ] && [ -f "$VENV_PATH/bin/activate" ]; then
+    source "$VENV_PATH/bin/activate"
+elif [ -f "$HOME/.venv_paddleocr/bin/activate" ]; then
+    source "$HOME/.venv_paddleocr/bin/activate"
+fi
 mkdir -p "$PROJECT_DIR/logs"
 
 start_if_not_running() {
@@ -31,7 +36,7 @@ start_if_not_running() {
 VL_PRECISION=$(python -c "
 import json, sys
 try:
-    with open('web_config.json', 'r', encoding='utf-8') as f:
+    with open('$PROJECT_DIR/web_config.json', 'r', encoding='utf-8') as f:
         cfg = json.load(f)
     print(cfg.get('defaults', {}).get('vl_precision', 'q5_k_m'))
 except Exception:

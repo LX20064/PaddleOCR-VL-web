@@ -4,7 +4,6 @@ pillow
 # 用户网页（web_ocr.py）Markdown 预览/导出
 markdown>=3.5
 beautifulsoup4>=4.12
-pypandoc_binary>=1.13
 # 纯 Python Markdown→DOCX 渲染（wordrender.py）
 python-docx>=1.1
 docx-equation>=0.3

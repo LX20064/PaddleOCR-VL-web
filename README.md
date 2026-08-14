@@ -59,11 +59,13 @@ df -h ~           # 确认家目录剩余空间充足（首次运行会自动下
 
 ```bash
 sudo apt update
-sudo apt install -y python3.12-venv curl
+sudo apt install -y python3.12-venv curl poppler-utils
 
 python3 -m venv ~/.venv_paddleocr
 source ~/.venv_paddleocr/bin/activate
 ```
+
+> 说明：`poppler-utils` 提供 `pdftoppm`，用于网页端 PDF 解析后的页面图片预览；缺失时解析功能不受影响，但 PDF 结果预览图无法生成。
 
 ## 第 2 步：安装 PaddlePaddle + PaddleOCR-VL
 
@@ -233,7 +235,7 @@ journalctl -u paddleocr-vl-api -f
 | 参数 | 说明 |
 |---|---|
 | 上下文长度 | VLM 单页最大生成 token（留空 = 后端默认） |
-| 显存占用比（单图最大像素） | 按 RTX 2080 8GB 估算：50%≈200 万、75%≈300 万、100%≈400 万像素；OOM 时调低 |
+| 显存占用比（单图最大像素） | 当前 llama-cpp-server 后端不支持（仅 vllm-server 生效），保持「不限制」即可 |
 | 采样温度 temperature | VLM 采样参数，输出异常（重复、幻觉）时可调 |
 | top_p 核采样 | VLM 采样参数 |
 
@@ -251,7 +253,7 @@ journalctl -u paddleocr-vl-api -f
 | 块内容格式化 | 将表格/公式等结构化内容渲染为 Markdown 格式 |
 | 单图识别类型 | 关闭版面分析后生效：ocr / formula / table / seal / chart / spotting |
 | 版面检测阈值 | 0~1，调低抓更多块、调高减少误检 |
-| 最小像素总量 | VLM 预处理的最小像素 |
+| 最小像素总量 | 当前 llama-cpp-server 后端不支持（仅 vllm-server 生效），保持「留空」即可 |
 | 重复惩罚 | VLM 采样参数 |
 
 **PDF 与高级选项**
@@ -353,10 +355,28 @@ PaddleOCR-VL 产线各功能在本部署中的默认开/关如下：
 }
 ```
 
-注意：通过 MCP 调用时，`file_path` 支持两种形式：
-1. **公网 http(s) URL**——指向本机/内网地址的 URL 会被 Gradio 的 SSRF 防护拦截
-   （包括 upload_file_to_gradio 返回的同机 URL），不可用；
-2. **base64 data URI**（`data:image/png;base64,...`）——本地文件先编码再传入，最通用。
+注意：通过 MCP 调用时，`file_path` 只支持以下两种形式：
+
+1. **公网 http(s) URL**——文件需托管在**公网可访问**的地址上。由于 Gradio 内置
+   **SSRF 防护**（`safehttpx` 校验），指向本机 / 内网 / 私有 IP 的 URL 一律被拦截，
+   直接报 `Hostname xxx failed validation`，因此以下地址均**不可用**：
+   `http://127.0.0.1:...`、`http://localhost:...`、`http://192.168.x.x:...`、
+   `http://10.x.x.x:...`，也包括 `upload_file_to_gradio` 返回的同机 URL。
+2. **base64 data URI**（`data:image/png;base64,....`）——最通用、推荐的方式。
+   在 Agent / 客户端本地把文件内容编码为 base64 后作为 `file_path` 传入，
+   MCP 服务器端会自动解码为临时文件处理，不受 SSRF 限制。
+   编码方法示例：
+
+   ```bash
+   # Linux / macOS（获取可用于 file_path 的 data URI）
+   base64 -w0 test_scan.png | sed 's#^#data:image/png;base64,#'
+
+   # 也可用 Python 生成
+   python3 -c "import base64;print('data:image/png;base64,'+base64.b64encode(open('test_scan.png','rb').read()).decode())"
+   ```
+
+   若 Agent 客户端自身能读取本地文件（如 Cherry Studio 的本地附件），通常会
+   自动用 data URI 形式传给工具，无需手动编码。
 如需关闭内置 MCP：启动前设 `GRADIO_MCP_SERVER=False`。
 另一条可选路线是官方 paddleocr-mcp（自托管模式指向 8080 服务），二者可并存。
 
@@ -372,7 +392,7 @@ PaddleOCR-VL 模型并转换为 GGUF（首次按需量化会额外耗时数分�
 > 此时可手动重试 `python model_manager.py ensure-all`，或适当调大管理后台的「请求超时」。
 
 **Q2. 显存溢出（OOM）怎么办？**
-- 网页端「参数设置」里把「显存占用比（单图最大像素）」调低（如 2000000 左右）；
+- 当前 llama-cpp-server 后端不支持「显存占用比 / 最小像素总量」参数，无需调整这两项；
 - 确认没有其它程序占用显存（`nvidia-smi`）；
 - 在管理后台「默认设置」把 VLM 量化精度切换为更低档（如 q4_k_m），减少显存占用。
 

@@ -143,7 +143,12 @@ def _write_status(st: dict) -> None:
 
 
 def status_update(fields: dict | None = None, bumps: dict | None = None) -> None:
-    """带文件锁的状态更新。fields 直接覆盖，bumps 做计数累加。"""
+    """带文件锁的状态更新。fields 直接覆盖，bumps 做计数累加。
+
+    写入前强制清洗计数不变量：failed ≤ done ≤ started ≤ submitted。
+    防止历史遗留或异常路径（进程中断等）造成 started > submitted 之类的漂移，
+    保证管理后台「排队数 = submitted - started」恒为合理值。
+    """
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(_LOCK_PATH, "w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX)
@@ -152,5 +157,8 @@ def status_update(fields: dict | None = None, bumps: dict | None = None) -> None
             st.update(fields)
         for k, delta in (bumps or {}).items():
             st[k] = int(st.get(k, 0)) + delta
+        st["started"] = min(int(st.get("started", 0)), int(st.get("submitted", 0)))
+        st["done"] = min(int(st.get("done", 0)), int(st.get("started", 0)))
+        st["failed"] = min(int(st.get("failed", 0)), int(st.get("done", 0)))
         st["updated_at"] = time.time()
         _write_status(st)

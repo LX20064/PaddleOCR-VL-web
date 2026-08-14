@@ -14,7 +14,8 @@ PaddleOCR-VL 文档解析网页界面（Web UI + MCP 双模式）
   - 请求排队（队列）；实时把进度与排队计数写入 logs/status.json 供管理后台展示
   - 服务软开关：总开关 / 网页子开关 / MCP 子开关（管理后台控制，即时生效）
   - 内置 MCP 服务器（独立入口函数，受 MCP 子开关单独控制）：
-    http://<IP>:7860/gradio_api/mcp/ ，Agent 调用时文件请传 http(s) URL
+    http://<IP>:7860/gradio_api/mcp/ ，Agent 调用时文件请传 base64 data URI
+    （或公网 http(s) URL；本机/内网 URL 会被 Gradio SSRF 防护拦截）
 
 开关与默认值来源：web_config.json（由管理后台 admin.py 维护）。
 环境变量（可选）：
@@ -33,6 +34,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 import zipfile
@@ -86,47 +88,6 @@ def _clean_old_outputs(max_age_days: int | None = None):
                     shutil.rmtree(child, ignore_errors=True)
     except OSError:
         pass
-
-# Pandoc 本地 Word 生成（pypandoc_binary 自带 pandoc 二进制，为声明依赖）
-import pypandoc
-
-
-def _md_to_html(md_text: str, images: dict, page_prefix: str = "") -> str:
-    """将 Markdown(+raw_html+tex) 转为 HTML（含 MathML 公式），图片写入临时目录。
-
-    返回 (html_body_str, out_dir)。HTML 可用于直接导出 .html 或交给 Pandoc 转 .docx。"""
-    images_dir = Path(tempfile.mkdtemp(prefix="paddleocr_img_"))
-    embedded = 0
-    missing = 0
-    processed_md = md_text
-    for rel_path, b64 in images.items():
-        safe_name = page_prefix + rel_path.replace("/", "_").replace("\\", "_")
-        img_file = images_dir / safe_name
-        try:
-            img_file.write_bytes(base64.b64decode(b64))
-        except Exception:
-            continue
-        # 替换 Markdown 中的相对路径为本地绝对路径
-        old = processed_md
-        processed_md = processed_md.replace(rel_path, str(img_file))
-        if processed_md != old:
-            embedded += 1
-        else:
-            # 图片在 images dict 中存在但未在 Markdown 文本中被引用
-            missing += 1
-    if missing:
-        print(f"[PaddleOCR-VL] _md_to_html: {missing} image(s) not referenced in markdown text")
-    if images and embedded == 0:
-        print(f"[PaddleOCR-VL] WARNING: {len(images)} image(s) in dict but NONE replaced in markdown")
-
-    html = pypandoc.convert_text(
-        processed_md,
-        "html",
-        format="markdown+raw_html+tex_math_dollars",
-        extra_args=["--mathml"],
-    )
-    return html, images_dir
-
 
 def _image_data_uri(b64: str) -> str:
     """根据 base64 图片内容嗅探 MIME 类型，返回 data URI。
@@ -318,21 +279,24 @@ def _md_to_docx_python(
     Markdown 中引用的相对路径写入临时目录，再交给 write_docx。
     """
     base_dir = Path(tempfile.mkdtemp(prefix="paddleocr_wr_"))
-    processed_md = md_text
-    for rel_path, b64 in images.items():
-        # 保持相对路径结构，仅做页前缀去重与非法字符清洗
-        safe_rel = page_prefix + rel_path.replace("\\", "/")
-        safe_rel = safe_rel.lstrip("/")
-        target = base_dir / safe_rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        try:
-            target.write_bytes(base64.b64decode(b64))
-        except Exception:
-            continue
-        processed_md = processed_md.replace(rel_path, safe_rel)
+    try:
+        processed_md = md_text
+        for rel_path, b64 in images.items():
+            # 保持相对路径结构，仅做页前缀去重与非法字符清洗
+            safe_rel = page_prefix + rel_path.replace("\\", "/")
+            safe_rel = safe_rel.lstrip("/")
+            target = base_dir / safe_rel
+            target.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                target.write_bytes(base64.b64decode(b64))
+            except Exception:
+                continue
+            processed_md = processed_md.replace(rel_path, safe_rel)
 
-    summary = wordrender.write_docx(processed_md, out_path, base_dir)
-    return f"(公式{summary.formulas_converted} 图片{summary.images_embedded})"
+        summary = wordrender.write_docx(processed_md, out_path, base_dir)
+        return f"(公式{summary.formulas_converted} 图片{summary.images_embedded})"
+    finally:
+        shutil.rmtree(base_dir, ignore_errors=True)
 
 IMAGE_EXTS = {".jpg", ".jpeg", ".png", ".bmp", ".tif", ".tiff", ".webp"}
 
@@ -470,7 +434,7 @@ def _parse_core(
     yield _status_yield(0.2, "服务器解析中（大图 / 多页 PDF 可能需要几分钟）…")
     t0 = time.time()
     try:
-        resp = requests.post(api_url, json=payload, timeout=timeout)
+        resp = _http_post(api_url, payload, timeout)
     except requests.ConnectionError:
         raise gr.Error(
             f"无法连接 OCR 服务：{api_url}\n"
@@ -526,7 +490,7 @@ def _parse_core(
         }
 
         try:
-            rp = requests.post(get_restructure_url(), json=rp_payload, timeout=timeout)
+            rp = _http_post(get_restructure_url(), rp_payload, timeout)
         except (requests.ConnectionError, requests.Timeout):
             raise gr.Error("调用 /restructure-pages 合并服务失败，请查看服务端日志。")
         rp_data = rp.json()
@@ -557,7 +521,7 @@ def _parse_core(
         if export_mode == "html":
             _prog(0.9, "生成结构化 HTML…")
             yield _status_yield(0.9, "生成结构化 HTML…")
-            html_content = _md_to_html(full_md, merged_images)[0]
+            html_content = _markdown.markdown(full_md, extensions=["tables", "fenced_code"])
             soup = BeautifulSoup(html_content, "html.parser")
             for img_tag in soup.find_all("img"):
                 src = img_tag.get("src") or ""
@@ -599,7 +563,7 @@ def _parse_core(
                 zf.writestr(f"{stem}.md", full_md)
                 # 图片写入 imgs/ 子目录
                 for rel_path, b64 in merged_images.items():
-                    zf.writestr(f"imgs/{rel_path.replace('/', '_')}", base64.b64decode(b64))
+                    zf.writestr(rel_path, base64.b64decode(b64))
                 if export_mode == "html" and html_content:
                     zf.writestr(f"{stem}.html", html_content)
                 elif export_mode == "json" and json_text:
@@ -617,7 +581,7 @@ def _parse_core(
                 zf.writestr(f"{stem}.docx", docx_path.read_bytes())
                 zf.writestr(f"{stem}.json", json_text)
                 for rel_path, b64 in merged_images.items():
-                    zf.writestr(f"imgs/{rel_path.replace('/', '_')}", base64.b64decode(b64))
+                    zf.writestr(rel_path, base64.b64decode(b64))
                 _add_chart_crops(zf, chart_crops)
             status = f"✅ 解析并合并完成：共 {len(pages)} 页 → 单个 Word（{source_label}），耗时 {elapsed:.1f} 秒"
             yield status, full_md or "(无文本内容)", str(zip_path), merged_images
@@ -639,7 +603,7 @@ def _parse_core(
                 # 图片写入该页 imgs/ 子目录，避免不同页同名图片冲突
                 for rel, b64 in imgs.items():
                     all_images[f"{tag}/{rel}"] = b64
-                    zf.writestr(f"{tag}/imgs/{rel.replace('/', '_')}", base64.b64decode(b64))
+                    zf.writestr(f"{tag}/{rel}", base64.b64decode(b64))
                 zf.writestr(f"{tag}/{stem}_{i:02d}.md", text)
                 if export_mode == "docx":
                     docx_path = out_dir / f"{tag}_{stem}.docx"
@@ -735,7 +699,7 @@ def _parse_core(
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             zf.writestr(f"{stem}.md", full_md)
             for rel_path, b64 in images.items():
-                zf.writestr(f"imgs/{rel_path.replace('/', '_')}", base64.b64decode(b64))
+                zf.writestr(rel_path, base64.b64decode(b64))
             if export_mode == "html":
                 # 生成 HTML（单图版）
                 html_content = _markdown.markdown(full_md, extensions=["tables", "fenced_code"])
@@ -776,13 +740,52 @@ def _parse_core(
                 zf.writestr(f"{stem}.docx", docx_path.read_bytes())
             zf.writestr(f"{stem}.json", json_text)
             for rel_path, b64 in images.items():
-                zf.writestr(f"imgs/{rel_path.replace('/', '_')}", base64.b64decode(b64))
+                zf.writestr(rel_path, base64.b64decode(b64))
             _add_chart_crops(zf, chart_crops)
         status = f"✅ 解析完成：共 {len(pages)} 页，耗时 {elapsed:.1f} 秒"
         yield status, full_md, str(zip_path), images
 
 
 # ==================== 入口包装（门控 + 状态上报） ====================
+
+def _err_text(e):
+    """提取异常的可读消息：gr.Error.__str__ 返回 repr(message)（带单引号），故取其 message。"""
+    return e.message if isinstance(e, gr.Error) else str(e)
+
+
+# ==================== 停止支持 ====================
+# 全局停止标志：批量处理 / 重新导出 / MCP 每个入口开始时清零，
+# 仅「停止」按钮（_stop_batch）置位。进行中的 HTTP 请求由 _http_post 轮询检测。
+_stop_event = threading.Event()
+
+
+class _UserStopped(Exception):
+    """用户在处理过程中点击了「停止」。"""
+
+
+def _http_post(url, payload, timeout):
+    """可被「停止」打断的 requests.post：请求在守护线程中执行，主线程每 0.5s
+    检查一次停止标志；点击停止后立即放弃等待并抛 _UserStopped。
+    注意：服务端已接收的解析任务无法取消，会自行跑完（其响应被丢弃，
+    守护线程随之结束），但客户端与批量循环得以及时退出。"""
+    box = {}
+
+    def _call():
+        try:
+            box["resp"] = requests.post(url, json=payload, timeout=timeout)
+        except Exception as e:  # 原样转交主线程，保持既有异常分类（连接/超时等）
+            box["err"] = e
+
+    t = threading.Thread(target=_call, daemon=True)
+    t.start()
+    while t.is_alive():
+        if _stop_event.is_set():
+            raise _UserStopped()
+        t.join(0.5)
+    if "err" in box:
+        raise box["err"]
+    return box["resp"]
+
 
 def _guarded_entry(channel, *args):
     """统一入口（生成器）：开关门控 → 状态计数 → 核心解析 → 状态收尾。
@@ -793,7 +796,7 @@ def _guarded_entry(channel, *args):
     try:
         _ensure_enabled(channel)
     except Exception as e:
-        yield "⛔ 服务未开启", f"**解析未启动**：{e}", None, {}
+        yield "⛔ 服务未开启", f"**解析未启动**：{_err_text(e)}", None, {}
         return
 
     # submitted 与 started 必须成对增长，否则 waiting=max(0, submitted-started) 恒为 0。
@@ -809,14 +812,23 @@ def _guarded_entry(channel, *args):
     )
     try:
         yield from _parse_core(*args)
+    except _UserStopped:
+        print(f"[PaddleOCR-VL] 用户停止（{channel}）：{file_name}", flush=True)
+        status_update(
+            {"state": "idle", "progress": 1.0, "desc": "最近任务：用户手动停止"},
+            bumps={"done": 1, "failed": 1},
+        )
+        yield ("⏹ 已停止：用户手动停止",
+               "**已停止**：用户手动停止（服务端已发出的解析会自行跑完）", None, {})
+        return
     except Exception as e:
         print(f"[PaddleOCR-VL] 任务失败（{channel}）：{file_name} — {e}", flush=True)
         status_update(
-            {"state": "idle", "progress": 1.0, "desc": f"最近任务失败：{e}"},
+            {"state": "idle", "progress": 1.0, "desc": f"最近任务失败：{_err_text(e)}"},
             bumps={"done": 1, "failed": 1},
         )
-        err_md = f"**解析失败**：{e}"
-        yield f"❌ 失败：{e}", err_md, None, {}
+        err_md = f"**解析失败**：{_err_text(e)}"
+        yield f"❌ 失败：{_err_text(e)}", err_md, None, {}
         return
     status_update(
         {"state": "idle", "progress": 1.0, "desc": f"最近完成：{file_name}"},
@@ -859,14 +871,6 @@ def _to_canonical(ui):
         _opt_float(thr), _opt_int(minpix), _opt_int(ctx),
         _opt_float(temp), _opt_float(topp), _opt_float(rep),
     )
-
-
-def ui_parse(file_path, *ui_core):
-    """网页入口（不暴露为 MCP 工具）：UI 参数顺序 → 后端顺序后执行。"""
-    # 单文件网页扫描不经批量提交计数（_batch_run），此处同步 bump submitted，
-    # 保持 submitted/started 成对，「排队等待」统计才准确。
-    status_update(bumps={"submitted": 1})
-    yield from _guarded_entry("web", file_path, *_to_canonical(ui_core))
 
 
 def _mcp_defaults():
@@ -914,6 +918,7 @@ def paddleocr_vl(file_path):
     """
     # MCP 入口使用非生成器版本，避免 MCP 协议对生成器的兼容问题；
     # 仅暴露 file_path 一个参数，其余走后端默认值（见 _mcp_defaults）。
+    _stop_event.clear()   # MCP 调用与网页「停止」按钮无关，起始即清除残留标志
     result = _consume_generator(_guarded_entry("mcp", file_path, *_mcp_defaults()))
     return result[:3] if isinstance(result, (tuple, list)) else result
 
@@ -1092,7 +1097,7 @@ def _file_count_md(queue):
 def _stats_html(queue):
     total = len(queue)
     done = sum(1 for r in queue if r["status"] == "完成")
-    failed = sum(1 for r in queue if r["status"] == "失败")
+    failed = sum(1 for r in queue if r["status"] in ("失败", "已停止"))
     secs = sum(float(r.get("time") or 0) for r in queue)
     pages = sum(int(r.get("pages") or 0) for r in queue)
     per_page = secs / pages if pages else 0.0
@@ -1167,7 +1172,8 @@ def _clear_queue():
 
 
 def _on_row_result_select(evt: gr.EventData, queue, cache):
-    """选中任务队列某行：返回选中行号 + 右侧展示该文件解析结果。
+    """选中任务队列某行：返回选中行号 + 右侧展示该文件解析结果，
+    并把 last_file 切到该行（导出按钮跟随当前查看的文件，所见即所导）。
 
     evt.row 为前端点击 HTML 表格行时经 trigger('click', {row}) 传入的行号（0 起始）。"""
     try:
@@ -1175,10 +1181,10 @@ def _on_row_result_select(evt: gr.EventData, queue, cache):
     except (TypeError, ValueError, AttributeError):
         row = -1
     if row < 0 or not queue or row >= len(queue):
-        return -1, gr.update(), gr.update(), gr.update(), gr.update()
+        return -1, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
     info = (cache or {}).get(queue[row].get("path"))
     if not info or not info.get("md"):
-        return row, gr.update(), gr.update(), gr.update(), gr.update()
+        return row, gr.update(), gr.update(), gr.update(), gr.update(), gr.update()
     md = info["md"]
     images = info.get("images") or {}
     imgs = info.get("img") or []
@@ -1192,6 +1198,7 @@ def _on_row_result_select(evt: gr.EventData, queue, cache):
         gr.update(value=render_html),
         gr.update(value=md),
         (gr.update(value=imgs) if imgs else gr.update()),
+        queue[row]["path"],    # last_file 跟随选中行
     )
 
 
@@ -1244,6 +1251,7 @@ def _batch_run(queue, *all_ui):
 
     # 提交计数：一次批量任务提交 N 个文件（排队数 = submitted - started）
     status_update(bumps={"submitted": len(files)})
+    _stop_event.clear()   # 新批次开始，清除上一次可能残留的停止标志
 
     settings = _to_canonical(ui_core)
     for rec in files:
@@ -1263,6 +1271,10 @@ def _batch_run(queue, *all_ui):
 
     for i, rec in enumerate(files):
         name = rec["name"]
+        if _stop_event.is_set():
+            # 上一文件被停止后不再开始新文件（未处理的保持「等待」，由 _stop_batch 标记）
+            logs.append(f"[{ts()}] ⏹ 已停止，跳过剩余 {len(files) - i} 个文件")
+            break
         rec["status"] = "处理中"
         logs.append(f"[{ts()}] → [{i + 1}/{len(files)}] 开始：{name}")
         yield pack(
@@ -1302,43 +1314,57 @@ def _batch_run(queue, *all_ui):
             status_str, md_text, dl_path = last_item[:3]
             result_images = last_item[3] if len(last_item) > 3 else {}
             elapsed = time.time() - t0
-            m_pages = re.search(r"共 (\d+) 页", str(status_str))
-            pages = int(m_pages.group(1)) if m_pages else 1
-            rec.update({"status": "完成", "elapsed": f"{elapsed:.1f}s",
-                        "pages": pages, "time": elapsed, "download": dl_path})
-            done += 1
             total_secs += elapsed
-            total_pages += pages
-            last_download = dl_path
-            last_file = rec["path"]
-            last_md = md_text
-            # 原图预览：图片用上传原图；PDF 用 pdftoppm 渲染出的页面 PNG
-            if Path(rec["path"]).suffix.lower() in IMAGE_EXTS:
-                preview_imgs = [rec["path"]]
+            # _guarded_entry 内部捕获异常后以 ❌/⛔/⏹ 状态元组正常 yield（不抛出），
+            # 必须据此判定失败/停止，否则失败文件会被误标「完成」并污染结果缓存
+            if str(status_str).startswith(("❌", "⛔", "⏹")):
+                stopped = str(status_str).startswith("⏹")
+                rec.update({"status": "已停止" if stopped else "失败",
+                            "elapsed": f"{elapsed:.1f}s", "time": elapsed})
+                failed += 1
+                _persist_state(queue=files)
+                reason = str(status_str).split("：", 1)[-1]
+                if stopped:
+                    logs.append(f"[{ts()}] ⏹ [{i + 1}/{len(files)}] 已停止：{name}")
+                else:
+                    logs.append(f"[{ts()}] ✖ [{i + 1}/{len(files)}] 失败：{name} → {reason}")
             else:
-                preview_imgs = _render_pdf_pages(rec["path"])
-            result_cache[rec["path"]] = {
-                "md": md_text,
-                "img": preview_imgs,
-                "images": result_images,
-                "html": _md_to_preview_html(md_text, result_images),
-            }
-            _persist_state(queue=files, last=last_file, cache=result_cache)
-            combined.append(f"\n\n---\n\n## 📄 {name}\n\n{md_text}")
-            logs.append(f"[{ts()}] ✔ [{i + 1}/{len(files)}] 完成：{name}"
-                        f"（{pages} 页，{elapsed:.1f}s）")
+                m_pages = re.search(r"共 (\d+) 页", str(status_str))
+                pages = int(m_pages.group(1)) if m_pages else 1
+                rec.update({"status": "完成", "elapsed": f"{elapsed:.1f}s",
+                            "pages": pages, "time": elapsed, "download": dl_path})
+                total_pages += pages
+                last_download = dl_path
+                last_file = rec["path"]
+                last_md = md_text
+                # 原图预览：图片用上传原图；PDF 用 pdftoppm 渲染出的页面 PNG
+                if Path(rec["path"]).suffix.lower() in IMAGE_EXTS:
+                    preview_imgs = [rec["path"]]
+                else:
+                    preview_imgs = _render_pdf_pages(rec["path"])
+                result_cache[rec["path"]] = {
+                    "md": md_text,
+                    "img": preview_imgs,
+                    "images": result_images,
+                    "html": _md_to_preview_html(md_text, result_images),
+                }
+                _persist_state(queue=files, last=last_file, cache=result_cache)
+                combined.append(f"\n\n---\n\n## 📄 {name}\n\n{md_text}")
+                done += 1
+                logs.append(f"[{ts()}] ✔ [{i + 1}/{len(files)}] 完成：{name}"
+                            f"（{pages} 页，{elapsed:.1f}s）")
         except gr.Error as e:
             elapsed = time.time() - t0
             rec.update({"status": "失败", "elapsed": f"{elapsed:.1f}s", "time": elapsed})
             failed += 1
             total_secs += elapsed
-            logs.append(f"[{ts()}] ✖ [{i + 1}/{len(files)}] 失败：{name} → {e}")
+            logs.append(f"[{ts()}] ✖ [{i + 1}/{len(files)}] 失败：{name} → {_err_text(e)}")
         except Exception as e:
             elapsed = time.time() - t0
             rec.update({"status": "失败", "elapsed": f"{elapsed:.1f}s", "time": elapsed})
             failed += 1
             total_secs += elapsed
-            logs.append(f"[{ts()}] ✖ [{i + 1}/{len(files)}] 失败：{name} → {e}")
+            logs.append(f"[{ts()}] ✖ [{i + 1}/{len(files)}] 失败：{name} → {_err_text(e)}")
 
         done_files = i + 1
         elapsed_global = time.time() - t_global
@@ -1363,8 +1389,12 @@ def _batch_run(queue, *all_ui):
 
     elapsed_total = time.time() - t_global
     avg_sec_per_page = total_secs / total_pages if total_pages else 0.0
-    final_desc = (f"✅ 批量完成：{len(files)} 个文件，成功 {done}，失败 {failed}，"
-                  f"总耗时 {elapsed_total:.1f}s（平均 {avg_sec_per_page:.2f}s/页）")
+    if _stop_event.is_set() and (done + failed) < len(files):
+        final_desc = (f"⏹ 批量已停止：成功 {done}，失败 {failed}，"
+                      f"未处理 {len(files) - done - failed} 个，已用 {elapsed_total:.1f}s")
+    else:
+        final_desc = (f"✅ 批量完成：{len(files)} 个文件，成功 {done}，失败 {failed}，"
+                      f"总耗时 {elapsed_total:.1f}s（平均 {avg_sec_per_page:.2f}s/页）")
     logs.append(f"[{ts()}] 🏁 {final_desc}")
     yield pack(
         df=_queue_table(files) or None,
@@ -1380,10 +1410,13 @@ def _batch_run(queue, *all_ui):
 
 
 def _stop_batch(queue, log_text):
-    """停止批量处理：将处理中的任务标记为已停止。"""
+    """停止批量处理：置位停止标志（进行中的 HTTP 请求会被 _http_post 放弃，
+    批量循环随之退出），并把处理中/等待中的任务标记为已停止。
+    注意：服务端已接收的解析任务无法取消，会自行跑完。"""
+    _stop_event.set()
     queue = list(queue or [])
     for rec in queue:
-        if rec["status"] == "处理中":
+        if rec["status"] in ("处理中", "等待"):
             rec["status"] = "已停止"
     t = time.strftime("%H:%M:%S")
     log_text = f"{log_text or ''}\n[{t}] ⏹ 用户手动停止批量处理"
@@ -1395,12 +1428,12 @@ def _stop_batch(queue, log_text):
         gr.update(value=_file_count_md(queue)),
         gr.update(value=_stats_html(queue)),
         log_text,
-        "⏹ 已停止",
+        "⏹ 已停止（服务端进行中的解析会自行跑完）",
     )
 
 
 def _export_last(mode, last_file, *ui_core_with_md):
-    """按 mode 重新导出：重新解析最后一个成功文件。
+    """按 mode 重新导出：重新解析当前查看的文件（最近成功或队列中点选）。
 
     注意：last_file 始终保持「原始待解析文件」；
     mode ∈ ("docx", "html", "json", "zip_md") 直接传给 _parse_core.export_mode。
@@ -1420,6 +1453,7 @@ def _export_last(mode, last_file, *ui_core_with_md):
     logs.append(f"[{now()}] ▶ 重新解析并导出 {label}：{Path(last_file).name}")
     # 与 ui_parse 同理：重新导出也是一次网页提交的解析，同步 bump submitted
     status_update(bumps={"submitted": 1})
+    _stop_event.clear()   # 新导出开始，清除上一次可能残留的停止标志
     try:
         gen = _guarded_entry("web", last_file, *canon, mode, per_page, export_chart)
         last = None
@@ -1431,11 +1465,17 @@ def _export_last(mode, last_file, *ui_core_with_md):
             else:
                 last = item
         st, _md, path = last[:3]
-        logs.append(f"[{now()}] ✔ 已生成 {label}，正在自动下载")
+        if str(st).startswith(("❌", "⛔", "⏹")):
+            logs.append(f"[{now()}] ✖ 导出失败：{str(st).split('：', 1)[-1]}")
+        else:
+            logs.append(f"[{now()}] ✔ 已生成 {label}，正在自动下载")
         yield "\n".join(logs), st, path, last_file
+    except _UserStopped:
+        logs.append(f"[{now()}] ⏹ 导出被用户停止")
+        yield "\n".join(logs), "⏹ 已停止：用户手动停止", None, last_file
     except Exception as e:
-        logs.append(f"[{now()}] ✖ 导出失败：{e}")
-        yield "\n".join(logs), f"❌ 导出失败：{e}", None, last_file
+        logs.append(f"[{now()}] ✖ 导出失败：{_err_text(e)}")
+        yield "\n".join(logs), f"❌ 导出失败：{_err_text(e)}", None, last_file
 
 
 def _export_word(last_file, *ui_core_with_md):
@@ -1567,6 +1607,7 @@ def _page_load(sid):
             gr.update(value=md_text or ""),
             (gr.update(value=img_list) if img_list else gr.update()),
             last_path,
+            cache,
         )
     )
 
@@ -2386,9 +2427,9 @@ window._scanSyncButtons = function () {
     else btn.setAttribute('disabled', 'disabled');
   });
 };
-// 运行日志折叠（§5）
+// 运行日志折叠（§5）：只隐藏日志文本框，保留标题栏与折叠按钮
 window._scanToggleLog = function () {
-  var box = document.getElementById('scan-log-card');
+  var box = document.getElementById('scan-log-box');
   var btn = document.getElementById('btn-log-toggle');
   if (!box) return;
   var hidden = box.style.display === 'none';
@@ -2488,7 +2529,7 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
     # ---------- 隐藏组件与状态 ----------
     queue_state = gr.State([])     # 任务队列
     sel_row = gr.State(None)
-    last_file = gr.State(None)     # 最近一次成功识别的文件
+    last_file = gr.State(None)     # 当前结果文件：最近一次成功识别，或队列中点选查看的文件
     md_state = gr.State("")        # 最近一次扫描的原始 Markdown 文本
     result_cache = gr.State({})    # {path: {"md":..., "img":...}} 文件解析结果缓存
     # 标签页会话标记：由 sessionStorage 生成，关闭标签页/浏览器即失效。
@@ -2643,7 +2684,8 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
                         choices=["不限制", "2000000", "3000000", "4000000"],
                         value=("不限制" if not _cfg_defaults["max_pixels"]
                                else str(int(_cfg_defaults["max_pixels"]))),
-                        label="显存占用比（单图最大像素）")
+                        label="显存占用比（单图最大像素）",
+                        info="当前 llama-cpp-server 后端不支持此参数（仅 vllm-server 生效）")
                     temperature_dd = gr.Dropdown(
                         choices=["留空", "0.1", "0.3", "0.5", "0.7", "0.9", "1.0"],
                         value="留空", label="采样温度 temperature")
@@ -2651,8 +2693,8 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
                         choices=["留空", "0.8", "0.9", "0.95", "1.0"],
                         value="留空", label="top_p 核采样")
                     gr.Markdown(
-                        "显存占用比按 RTX 2080 8GB 估算：50%≈200 万像素、75%≈300 万、"
-                        "100%≈400 万。显存不足（OOM）时调低该值即可。",
+                        "当前后端为 llama-cpp-server，显存占用比与最小像素总量参数不生效；"
+                        "如需缓解显存不足（OOM），请在管理后台切换为更低精度的 VL 量化模型（如 q5_k_m / q4_k_m）。",
                         elem_classes="scan-hint")
 
                 with gr.Column(elem_classes="scan-card"):
@@ -2694,7 +2736,8 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
                         value="留空", label="版面检测阈值")
                     minpix_dd = gr.Dropdown(
                         choices=["留空", "200000", "400000", "800000", "1200000"],
-                        value="留空", label="最小像素总量")
+                        value="留空", label="最小像素总量",
+                        info="当前 llama-cpp-server 后端不支持此参数（仅 vllm-server 生效）")
                     rep_dd = gr.Dropdown(
                         choices=["留空", "1.0", "1.2", "1.5", "2.0"],
                         value="留空", label="重复惩罚")
@@ -2775,7 +2818,7 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
         inputs=[sid_box],
         outputs=[svc_banner] + core_components + [pdf_per_page_cb, export_chart_cb]
                 + [file_table, file_drop, file_count_md, stats_html,
-                   md_out, render_out, md_code, img_out, last_file],
+                   md_out, render_out, md_code, img_out, last_file, result_cache],
         api_visibility="private",
     )
 
@@ -2803,7 +2846,7 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
         api_visibility="private")
     file_table.click(
         _on_row_result_select, inputs=[queue_state, result_cache],
-        outputs=[sel_row, md_out, render_out, md_code, img_out],
+        outputs=[sel_row, md_out, render_out, md_code, img_out, last_file],
         api_visibility="private")
 
     # ---- 批量处理：开始（生成器实时刷新）/ 停止（取消生成器） ----
@@ -2818,7 +2861,7 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
         cancels=[run_evt],
         api_visibility="private")
 
-    # ---- 结果导出（重新解析最后一个成功文件） ----
+    # ---- 结果导出（重新解析当前查看的文件：最近成功或队列中点选） ----
     # 导出完成后自动点击下载按钮（Gradio 的 DownloadButton 不会自动触发下载，
     # 需模拟点击其内部 <button> 才能让浏览器弹出下载）
     _AUTO_DL_JS = (
@@ -2904,7 +2947,7 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
     clear_log_btn.click(_clear_log, outputs=[log_text], api_visibility="private")
     log_toggle_btn.click(
         None,
-        js="() => { const box = document.getElementById('scan-log-card'); "
+        js="() => { const box = document.getElementById('scan-log-box'); "
            "if (!box) return; const h = box.style.display === 'none'; "
            "box.style.display = h ? '' : 'none'; "
            "const t = document.getElementById('btn-log-toggle'); "
