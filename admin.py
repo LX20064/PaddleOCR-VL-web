@@ -40,6 +40,7 @@ from web_common import (
     load_config,
     read_status,
     save_config,
+    status_update,
 )
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -74,7 +75,7 @@ def do_login(password: str):
             gr.update(), gr.update(),
             *([gr.update()] * len(_section_updates(0))),
             gr.update(), gr.update(), gr.update(), gr.update(),
-            gr.update(), gr.update(),
+            gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(),
@@ -91,7 +92,7 @@ def do_login(password: str):
         *_section_updates(0),              # 默认显示第一个菜单（展开列表）
         sw["scan_service"], sw["web_ui"], sw["mcp"],
         _switch_summary(sw),
-        cfg["api_url"], cfg["timeout"],
+        cfg["api_url"], cfg["timeout"], cfg.get("max_parallel", 1),
         d.get("use_orientation", False), d.get("use_unwarping", False),
         d.get("use_seal", False), d.get("use_chart", False),
         d.get("use_layout_mode", True), d.get("use_merge_blocks", True),
@@ -112,7 +113,7 @@ def _restore_login(login_state):
             gr.update(visible=False),      # 隐藏管理面板
             *([gr.update()] * len(_section_updates(0))),
             gr.update(), gr.update(), gr.update(), gr.update(),
-            gr.update(), gr.update(),
+            gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(),
@@ -129,7 +130,7 @@ def _restore_login(login_state):
         *_section_updates(0),
         sw["scan_service"], sw["web_ui"], sw["mcp"],
         _switch_summary(sw),
-        cfg["api_url"], cfg["timeout"],
+        cfg["api_url"], cfg["timeout"], cfg.get("max_parallel", 1),
         d.get("use_orientation", False), d.get("use_unwarping", False),
         d.get("use_seal", False), d.get("use_chart", False),
         d.get("use_layout_mode", True), d.get("use_merge_blocks", True),
@@ -150,7 +151,7 @@ def do_logout():
         gr.update(visible=False),          # 隐藏管理面板
         *([gr.update()] * len(_section_updates(0))),
         gr.update(), gr.update(), gr.update(), gr.update(),
-        gr.update(), gr.update(),
+        gr.update(), gr.update(), gr.update(),
         gr.update(), gr.update(), gr.update(), gr.update(),
         gr.update(), gr.update(), gr.update(), gr.update(),
         gr.update(), gr.update(),
@@ -224,8 +225,9 @@ def refresh_monitor(logged_in):
         return gr.update()
     st = read_status()
     sw = load_config()["switches"]
-    waiting = max(0, st["submitted"] - st["started"])   # 点击了但还没开始处理
-    active = 1 if st["state"] == "busy" else 0          # 当前是否正在处理（并发=1）
+    waiting = int(st.get("queued", 0))   # 当前排队等待处理的请求数（实时，清零累计统计不影响）
+    active = int(st.get("active", 0))    # 当前正在并发处理的请求数
+    max_parallel = int(load_config().get("max_parallel", 1))
 
     if st["state"] == "busy":
         prog_txt = f"🔄 处理中：**{st['file']}** — {int(st['progress'] * 100)}%（{st['desc']}）"
@@ -240,17 +242,33 @@ def refresh_monitor(logged_in):
     return (
         f"**服务开关**：{_switch_summary(sw).split(chr(10))[0].replace('#', '').strip()}\n\n"
         f"**当前进度**：{prog_txt}\n\n"
-        f"**排队等待**：{waiting} 个 ｜ **处理中**：{active} 个\n\n"
+        f"**排队等待**：{waiting} 个 ｜ **处理中**：{active} 个（最大并发 {max_parallel}）\n\n"
         f"**累计统计**：提交 {st['submitted']} ｜ 完成 {st['done'] - st['failed']} ｜ 失败 {st['failed']}\n\n"
         f"<sub>最近更新：{ts}（本页每 5 秒自动刷新）</sub>"
     )
+
+
+def reset_stats(logged_in):
+    """清零累计统计（提交 / 开始 / 完成 / 失败）。
+
+    不影响实时显示：当前进度、处理中（active）、排队等待（queued）均保持不变。
+    """
+    _require_login(logged_in)
+    status_update(fields={
+        "submitted": 0,
+        "started": 0,
+        "done": 0,
+        "failed": 0,
+    })
+    _log("累计统计已清零")
+    return refresh_monitor(logged_in)
 
 
 # ============================================================
 # 默认设置
 # ============================================================
 
-def save_defaults(api_url, timeout, orientation, unwarping, seal, chart,
+def save_defaults(api_url, timeout, max_parallel, orientation, unwarping, seal, chart,
                   layout_mode, merge_blocks, ocr_image_block, format_block,
                   pdf_per_page, export_chart,
                   max_pixels, cache_days, vl_precision, logged_in):
@@ -261,6 +279,7 @@ def save_defaults(api_url, timeout, orientation, unwarping, seal, chart,
         raise gr.Error("API 地址必须以 http:// 或 https:// 开头")
     cfg["api_url"] = api_url or cfg["api_url"]
     cfg["timeout"] = max(10, int(timeout))
+    cfg["max_parallel"] = max(1, min(8, int(max_parallel)))
     cfg["defaults"] = {
         "use_orientation": bool(orientation),
         "use_unwarping": bool(unwarping),
@@ -282,8 +301,13 @@ def save_defaults(api_url, timeout, orientation, unwarping, seal, chart,
             cfg["defaults"][key] = default_val
     save_config(cfg)
     _log(f"默认设置已保存：api_url={cfg['api_url']} timeout={cfg['timeout']} "
-         f"vl_precision={cfg['defaults']['vl_precision']}")
-    return "✅ 已保存。用户网页【刷新页面】后按新默认值显示；API 地址与超时立即生效。"
+         f"max_parallel={cfg['max_parallel']} vl_precision={cfg['defaults']['vl_precision']}")
+    return (
+        "✅ 已保存。用户网页【刷新页面】后按新默认值显示；API 地址与超时立即生效。\n\n"
+        f"⚙️ 最大并发推理数已设为 **{cfg['max_parallel']}**，"
+        "**需重启网页服务（web_ocr.py）后生效**。"
+        "并发 > 1 会成倍占用显存，请确认显卡显存充足，否则会 OOM。"
+    )
 
 
 def clear_cache_now(logged_in):
@@ -741,7 +765,9 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
                 with gr.Column(visible=False) as sec_monitor:
                     gr.HTML('<div class="router-section-title">运行监控</div>')
                     monitor_out = gr.Markdown("载入中…")
-                    monitor_btn = gr.Button("手动刷新")
+                    with gr.Row():
+                        monitor_btn = gr.Button("手动刷新")
+                        reset_btn = gr.Button("清零统计", variant="secondary")
 
                 # 默认设置
                 with gr.Column(visible=False) as sec_defaults:
@@ -753,6 +779,11 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
                     with gr.Column(elem_classes="router-card"):
                         cfg_api_url = gr.Textbox(label="后端 API 地址（/layout-parsing）")
                         cfg_timeout = gr.Number(label="请求超时（秒）", minimum=10, maximum=3600)
+                        cfg_max_parallel = gr.Number(
+                            label="最大并发推理数",
+                            minimum=1, maximum=8, precision=0, value=1,
+                            info="同时处理的最大请求数（1 = 串行）。增大需更大显存，否则可能 OOM；修改后需重启网页服务生效。",
+                        )
                         gr.Markdown("**用户网页默认勾选**")
                         with gr.Row():
                             d_orientation = gr.Checkbox(label="文档方向分类")
@@ -836,7 +867,7 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
         login_col, admin_col,
     ] + section_cols + menu_btns + [
         sw_master, sw_web, sw_mcp, switch_summary,
-        cfg_api_url, cfg_timeout,
+        cfg_api_url, cfg_timeout, cfg_max_parallel,
         d_orientation, d_unwarping, d_seal, d_chart,
         d_layout_mode, d_merge_blocks, d_ocr_image_block, d_format_block,
         d_pdf_per_page, d_export_chart,
@@ -880,6 +911,8 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
 
     monitor_btn.click(refresh_monitor, inputs=[login_state], outputs=monitor_out,
                       api_visibility="private")
+    reset_btn.click(reset_stats, inputs=[login_state], outputs=monitor_out,
+                    api_visibility="private")
     # 每 5 秒自动刷新监控（登录前隐藏面板，刷新开销可忽略）
     timer = gr.Timer(5)
     timer.tick(refresh_monitor, inputs=[login_state], outputs=monitor_out,
@@ -887,7 +920,8 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
 
     save_btn.click(
         save_defaults,
-        inputs=[cfg_api_url, cfg_timeout, d_orientation, d_unwarping, d_seal, d_chart,
+        inputs=[cfg_api_url, cfg_timeout, cfg_max_parallel,
+                d_orientation, d_unwarping, d_seal, d_chart,
                 d_layout_mode, d_merge_blocks, d_ocr_image_block, d_format_block,
                 d_pdf_per_page, d_export_chart,
                 d_max_pixels, d_cache_days, vl_precision, login_state],

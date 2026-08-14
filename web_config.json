@@ -1,6 +1,7 @@
 {
   "api_url": "http://127.0.0.1:8080/layout-parsing",
   "timeout": 600,
+  "max_parallel": 1,
   "admin_password_sha256": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
   "switches": {
     "scan_service": true,

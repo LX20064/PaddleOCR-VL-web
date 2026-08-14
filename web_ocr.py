@@ -802,12 +802,14 @@ def _guarded_entry(channel, *args):
         yield "⛔ 服务未开启", f"**解析未启动**：{_err_text(e)}", None, {}
         return
 
-    # submitted 与 started 必须成对增长，否则 waiting=max(0, submitted-started) 恒为 0。
-    # 批量任务的 submitted 由 _batch_run 按文件数统一 bump，此处不再重复；
-    # MCP 调用不经批量，故在此同步 bump。
-    bumps = {"started": 1}
+    # 实时排队数 queued 与累计统计（submitted/started）解耦，清零按钮不影响排队显示。
+    # web 通道：submitted/queued 已由 _batch_run / _export_last 在提交时统一 bump，
+    #   此处仅「开始处理」——从排队队列取出一个（queued-1）并计入处理中（active+1）。
+    # mcp 通道：提交即开始，submitted/started 同步 +1，排队数不变（queued 恒 0）。
     if channel == "mcp":
-        bumps["submitted"] = 1
+        bumps = {"submitted": 1, "started": 1, "active": 1}
+    else:
+        bumps = {"started": 1, "active": 1, "queued": -1}
     print(f"[PaddleOCR-VL] 开始处理（{channel}）：{file_name}", flush=True)
     status_update(
         {"state": "busy", "file": file_name, "progress": 0.0, "desc": "开始处理"},
@@ -819,7 +821,7 @@ def _guarded_entry(channel, *args):
         print(f"[PaddleOCR-VL] 用户停止（{channel}）：{file_name}", flush=True)
         status_update(
             {"state": "idle", "progress": 1.0, "desc": "最近任务：用户手动停止"},
-            bumps={"done": 1, "failed": 1},
+            bumps={"done": 1, "failed": 1, "active": -1},
         )
         yield ("⏹ 已停止：用户手动停止",
                "**已停止**：用户手动停止（服务端已发出的解析会自行跑完）", None, {})
@@ -828,14 +830,14 @@ def _guarded_entry(channel, *args):
         print(f"[PaddleOCR-VL] 任务失败（{channel}）：{file_name} — {e}", flush=True)
         status_update(
             {"state": "idle", "progress": 1.0, "desc": f"最近任务失败：{_err_text(e)}"},
-            bumps={"done": 1, "failed": 1},
+            bumps={"done": 1, "failed": 1, "active": -1},
         )
         err_md = f"**解析失败**：{_err_text(e)}"
         yield f"❌ 失败：{_err_text(e)}", err_md, None, {}
         return
     status_update(
         {"state": "idle", "progress": 1.0, "desc": f"最近完成：{file_name}"},
-        bumps={"done": 1},
+        bumps={"done": 1, "active": -1},
     )
     print(f"[PaddleOCR-VL] 完成（{channel}）：{file_name}", flush=True)
 
@@ -1036,7 +1038,7 @@ def _parse_mcp(input_data, file_type, return_images, runtime_params):
     print(f"[PaddleOCR-VL] MCP 开始处理：{_file_tag}", flush=True)
     status_update(
         {"state": "busy", "file": _file_tag, "progress": 0.0, "desc": "MCP 解析开始"},
-        bumps={"submitted": 1, "started": 1},
+        bumps={"submitted": 1, "started": 1, "active": 1},
     )
     try:
         payload_file, ft = _mcp_input_to_file(input_data, file_type)
@@ -1117,14 +1119,14 @@ def _parse_mcp(input_data, file_type, return_images, runtime_params):
             markdown = "No document content detected"  # 与官方一致：返回提示文本而非报错
         status_update(
             {"state": "idle", "progress": 1.0, "desc": f"最近完成：{_file_tag}"},
-            bumps={"done": 1},
+            bumps={"done": 1, "active": -1},
         )
         print(f"[PaddleOCR-VL] MCP 完成：{_file_tag}", flush=True)
         return markdown, len(pages), images
     except Exception:
         status_update(
             {"state": "idle", "progress": 1.0, "desc": f"最近任务失败：{_file_tag}"},
-            bumps={"done": 1, "failed": 1},
+            bumps={"done": 1, "failed": 1, "active": -1},
         )
         raise
 
@@ -1488,8 +1490,8 @@ def _batch_run(queue, *all_ui):
                    q=files, lastf=None)
         return
 
-    # 提交计数：一次批量任务提交 N 个文件（排队数 = submitted - started）
-    status_update(bumps={"submitted": len(files)})
+    # 提交计数：一次批量任务提交 N 个文件，实时排队数 queued 同步 +N
+    status_update(bumps={"submitted": len(files), "queued": len(files)})
     _stop_event.clear()   # 新批次开始，清除上一次可能残留的停止标志
 
     settings = _to_canonical(ui_core)
@@ -1690,8 +1692,8 @@ def _export_last(mode, last_file, *ui_core_with_md):
     labels = {"docx": "Word", "json": "JSON", "html": "HTML", "zip_md": "Markdown 原始文件"}
     label = labels.get(mode, mode)
     logs.append(f"[{now()}] ▶ 重新解析并导出 {label}：{Path(last_file).name}")
-    # 与 ui_parse 同理：重新导出也是一次网页提交的解析，同步 bump submitted
-    status_update(bumps={"submitted": 1})
+    # 与 ui_parse 同理：重新导出也是一次网页提交的解析，同步 bump submitted/queued
+    status_update(bumps={"submitted": 1, "queued": 1})
     _stop_event.clear()   # 新导出开始，清除上一次可能残留的停止标志
     try:
         gen = _guarded_entry("web", last_file, *canon, mode, per_page, export_chart)
@@ -3232,9 +3234,38 @@ for _fn in (_page_load, _add_files, _remove_selected, _clear_queue,
             _restore_defaults):
     _fn._mcp_type = "hidden"
 
+# paddleocr_vl 是 MCP 唯一对外工具；显式标记为 tool，便于 _sync_mcp_visibility
+# 根据 mcp 子开关在 "tool" / "hidden" 之间切换其可见性。
+paddleocr_vl._mcp_type = "tool"
+
+
+def _sync_mcp_visibility() -> None:
+    """后台守护线程：让 MCP 工具 paddleocr_vl 的可见性跟随 mcp 子开关动态变化。
+
+    Gradio 内置 MCP 的 tools/list 每次都会读取 block_fn.fn._mcp_type，
+    因此实时更新该属性即可实现「关闭 MCP 子开关时工具不可见」；这里以 1 秒
+    轮询配置文件开关，达到软门控的即时效果。
+    """
+    while True:
+        try:
+            _mcp_on = get_switches().get("mcp", True)
+            paddleocr_vl._mcp_type = "tool" if _mcp_on else "hidden"
+        except Exception:
+            pass
+        time.sleep(1)
+
+
 if __name__ == "__main__":
-    # 队列：服务一次只处理一个请求（8GB 显存 + 原生推理），其余排队等待
-    demo.queue(max_size=32, default_concurrency_limit=1)
+    # 启动后台守护线程：让 MCP 工具 paddleocr_vl 的可见性跟随 mcp 子开关动态变化
+    threading.Thread(
+        target=_sync_mcp_visibility, daemon=True, name="mcp-visibility-sync"
+    ).start()
+
+    # 队列：默认一次只处理一个请求（8GB 显存 + 原生推理），其余排队等待。
+    # 最大并发推理数可在管理后台「默认设置」中配置（为将来换大显存显卡预留），
+    # 但增大并发会成倍占用显存，8GB 显卡上请保持 1，否则可能 OOM。
+    _max_parallel = max(1, int(load_config().get("max_parallel", 1)))
+    demo.queue(max_size=32, default_concurrency_limit=_max_parallel)
     demo.launch(
         server_name=os.environ.get("GRADIO_SERVER_NAME", "0.0.0.0"),
         server_port=int(os.environ.get("GRADIO_SERVER_PORT", "7860")),

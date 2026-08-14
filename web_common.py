@@ -27,6 +27,10 @@ DEFAULT_CONFIG = {
     "api_url": "http://127.0.0.1:8080/layout-parsing",
     # 单次请求超时（秒）
     "timeout": 600,
+    # 最大并发推理数（网页队列 default_concurrency_limit）。默认 1 = 串行；
+    # 增大可同时处理多个请求，但会成倍占用显存（需更大显存显卡，否则 OOM）。
+    # 修改后需重启网页服务（web_ocr.py）生效。
+    "max_parallel": 1,
     # 管理后台密码的 SHA-256（默认密码 admin123，请登录后台后立即修改）
     "admin_password_sha256": "",
     # 服务开关（软门控：关闭时对应入口拒绝解析请求，进程仍常驻）
@@ -55,7 +59,9 @@ DEFAULT_CONFIG = {
 
 # 运行状态默认结构（logs/status.json）
 DEFAULT_STATUS = {
-    "state": "idle",     # idle / busy
+    "state": "idle",     # idle / busy（由 active 自动推导）
+    "active": 0,         # 当前正在并发处理的请求数
+    "queued": 0,         # 当前排队等待处理的请求数（实时，清零累计统计不影响）
     "file": "",          # 当前处理的文件名
     "progress": 0.0,     # 0~1
     "desc": "空闲",       # 阶段描述
@@ -155,9 +161,9 @@ def _write_status(st: dict) -> None:
 def status_update(fields: dict | None = None, bumps: dict | None = None) -> None:
     """带文件锁的状态更新。fields 直接覆盖，bumps 做计数累加。
 
-    写入前强制清洗计数不变量：failed ≤ done ≤ started ≤ submitted。
-    防止历史遗留或异常路径（进程中断等）造成 started > submitted 之类的漂移，
-    保证管理后台「排队数 = submitted - started」恒为合理值。
+    写入前强制清洗计数不变量：failed ≤ done ≤ started ≤ submitted，
+    并保证 active/queued（处理中/排队中）不为负。实时排队数 queued 与累计
+    统计解耦，清零累计统计（submitted/started/done/failed）不影响排队显示。
     """
     _LOCK_PATH.parent.mkdir(parents=True, exist_ok=True)
     with open(_LOCK_PATH, "w") as lock:
@@ -170,5 +176,9 @@ def status_update(fields: dict | None = None, bumps: dict | None = None) -> None
         st["started"] = min(int(st.get("started", 0)), int(st.get("submitted", 0)))
         st["done"] = min(int(st.get("done", 0)), int(st.get("started", 0)))
         st["failed"] = min(int(st.get("failed", 0)), int(st.get("done", 0)))
+        # 并发/排队计数：active、queued 均不得为负；state 完全由 active 推导（>0 即 busy）
+        st["active"] = max(0, int(st.get("active", 0)))
+        st["queued"] = max(0, int(st.get("queued", 0)))
+        st["state"] = "busy" if st["active"] > 0 else "idle"
         st["updated_at"] = time.time()
         _write_status(st)
