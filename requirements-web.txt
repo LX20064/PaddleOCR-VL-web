@@ -1,0 +1,15 @@
+gradio[mcp]>=5.0
+requests
+pillow
+# 用户网页（web_ocr.py）Markdown 预览/导出
+markdown>=3.5
+beautifulsoup4>=4.12
+pypandoc_binary>=1.13
+# 纯 Python Markdown→DOCX 渲染（wordrender.py）
+python-docx>=1.1
+docx-equation>=0.3
+latex2mathml>=3.77
+lxml>=5.0
+markdown-it-py>=3.0
+# 管理后台（admin.py）系统资源监控
+psutil>=5.9

@@ -1,0 +1,27 @@
+# ============================================================
+# PaddleOCR-VL 网页界面（Gradio）
+# 用法：
+#   1. 将文件中所有 YOUR_USER 替换为你的用户名
+#   2. sudo cp paddleocr-vl-web.service /etc/systemd/system/
+#   3. sudo systemctl daemon-reload
+#   4. sudo systemctl enable --now paddleocr-vl-web
+# ============================================================
+[Unit]
+Description=PaddleOCR-VL Web UI (Gradio, port 7860)
+After=network.target paddleocr-vl-api.service
+# 网页界面依赖 API 服务，API 挂了网页也没法用
+Requires=paddleocr-vl-api.service
+
+[Service]
+Type=simple
+User=YOUR_USER
+WorkingDirectory=/home/YOUR_USER/paddleocr-vl-web
+Environment=PADDLEOCR_API_URL=http://127.0.0.1:8080/layout-parsing
+Environment=GRADIO_SERVER_NAME=0.0.0.0
+Environment=GRADIO_SERVER_PORT=7860
+ExecStart=/home/YOUR_USER/.venv_paddleocr/bin/python /home/YOUR_USER/paddleocr-vl-web/web_ocr.py
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
