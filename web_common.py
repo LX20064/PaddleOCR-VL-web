@@ -106,8 +106,18 @@ def save_config(cfg: dict) -> None:
 
 
 def get_api_url() -> str:
-    """环境变量优先，其次配置文件（管理后台可改，即时生效）。"""
-    return os.environ.get("PADDLEOCR_API_URL") or load_config()["api_url"]
+    """返回 PaddleOCR-VL 推理服务地址（http/https，不含路径后缀）。
+
+    优先级：项目环境变量 PADDLEOCR_API_URL > 官方 paddleocr-mcp 兼容变量
+    （PADDLEOCR_MCP_SELF_HOSTED_BASE_URL / PADDLEOCR_MCP_SERVER_URL）> 配置文件。
+    官方变量兼容便于按官方文档方式（Self-hosted API）部署时直接复用同一套配置。
+    """
+    return (
+        os.environ.get("PADDLEOCR_API_URL")
+        or os.environ.get("PADDLEOCR_MCP_SELF_HOSTED_BASE_URL")
+        or os.environ.get("PADDLEOCR_MCP_SERVER_URL")
+        or load_config()["api_url"]
+    )
 
 
 def get_timeout() -> int:

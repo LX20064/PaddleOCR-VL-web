@@ -329,7 +329,19 @@ PaddleOCR-VL 产线各功能在本部署中的默认开/关如下：
 网页脚本已开启 Gradio 内置 MCP 服务器（需安装 `gradio[mcp]`，requirements-web.txt 已包含）：
 
 - MCP 接入地址：`http://服务器IP:7860/gradio_api/mcp/`（Streamable HTTP）
-- 工具名：`paddleocr_vl`（与官方 PaddleOCR MCP 的 PaddleOCR-VL 工具同名），仅暴露这一个工具；参数只有 `file_path`，其余产线参数采用管理后台「默认设置」中的后端默认值
+- 工具名：`paddleocr_vl`（与官方 PaddleOCR MCP 的 PaddleOCR-VL 工具**同名同签名**），
+  仅暴露这一个工具。签名与官方 paddleocr-mcp 完全一致：
+  `paddleocr_vl(input_data, output_mode="simple", file_type=None, return_images=True, runtime_params=None)`
+  - `input_data`：待解析的文档图像或 PDF（公网 URL / 本机绝对路径 / base64 data URI，见下）；
+    `file_path` 为旧版参数名，等价于 `input_data`（向后兼容，二选一即可）
+  - `output_mode`：`"simple"` 仅返回 Markdown；`"detailed"` 末尾追加 `Pages: N`
+  - `file_type`：`0`=PDF，`1`=图片，省略时按文件自动判断
+  - `return_images`：为 `True` 时 Markdown 中的图片以 base64 data URI 内嵌返回
+  - `runtime_params`：官方产线参数（snake_case，支持官方全部 22 个键），传 JSON 对象或
+    JSON 字符串，例如 `{"use_doc_orientation_classify": true, "layout_threshold": 0.5}`；
+    未给出的键取官方默认值（其中 `layout_nms` / `layout_unclip_ratio` /
+    `layout_merge_bboxes_mode` / `layout_shape_mode` / `vlm_extra_args` /
+    `markdown_ignore_labels` 本产线未实现，会被忽略）
 - Cherry Studio / Cursor 配置示例：
 
 ```json
@@ -355,20 +367,19 @@ PaddleOCR-VL 产线各功能在本部署中的默认开/关如下：
 }
 ```
 
-注意：通过 MCP 调用时，`file_path` 只支持以下两种形式：
+注意：`input_data` 支持以下三种形式（与官方一致，可任选其一）：
 
-1. **公网 http(s) URL**——文件需托管在**公网可访问**的地址上。由于 Gradio 内置
-   **SSRF 防护**（`safehttpx` 校验），指向本机 / 内网 / 私有 IP 的 URL 一律被拦截，
-   直接报 `Hostname xxx failed validation`，因此以下地址均**不可用**：
-   `http://127.0.0.1:...`、`http://localhost:...`、`http://192.168.x.x:...`、
-   `http://10.x.x.x:...`，也包括 `upload_file_to_gradio` 返回的同机 URL。
-2. **base64 data URI**（`data:image/png;base64,....`）——最通用、推荐的方式。
-   在 Agent / 客户端本地把文件内容编码为 base64 后作为 `file_path` 传入，
-   MCP 服务器端会自动解码为临时文件处理，不受 SSRF 限制。
+1. **HTTP(S) URL**——公网 / 内网 / 本机地址均可。文件由本服务进程下载后解析，
+   不受 Gradio 内置 SSRF 防护限制（该防护只拦截 Gradio 自身的文件下载链路），
+   因此 `http://127.0.0.1:...`、`http://192.168.x.x:...` 等内网文件服务器同样可用。
+2. **服务器本机绝对路径**——`input_data` 直接传服务器上的文件路径（如
+   `/home/user/scan.png`），服务端会自动读取编码。
+3. **base64 data URI**（`data:image/png;base64,....`）——最通用，客户端本地编码后
+   直接传入，适用于无法提供 URL / 路径的场景。
    编码方法示例：
 
    ```bash
-   # Linux / macOS（获取可用于 file_path 的 data URI）
+   # Linux / macOS（获取可用于 input_data 的 data URI）
    base64 -w0 test_scan.png | sed 's#^#data:image/png;base64,#'
 
    # 也可用 Python 生成
@@ -378,7 +389,32 @@ PaddleOCR-VL 产线各功能在本部署中的默认开/关如下：
    若 Agent 客户端自身能读取本地文件（如 Cherry Studio 的本地附件），通常会
    自动用 data URI 形式传给工具，无需手动编码。
 如需关闭内置 MCP：启动前设 `GRADIO_MCP_SERVER=False`。
-另一条可选路线是官方 paddleocr-mcp（自托管模式指向 8080 服务），二者可并存。
+
+### 与官方 paddleocr-mcp 的 HTTP(S) 连接兼容
+
+官方 `paddleocr-mcp` 的连接方式与本项目完全一致，两者可互换对接：
+
+- **MCP 传输层（客户端 ↔ MCP 服务器）**：官方默认走 stdio，加 `--http` 参数后
+  即提供 HTTP(S) 传输（`streamable-http`，`--host 0.0.0.0 --port 8000`，URL 形如
+  `http://IP:8000/mcp`）。本项目内置 MCP 同样是 HTTP(S)（`streamable-http`），
+  连接地址为 `http://服务器IP:7860/gradio_api/mcp/`，支持 Cherry Studio / Cursor /
+  Claude Desktop（mcp-remote 桥接）等一切支持 streamable-http 的客户端。
+- **推理层（MCP 服务器 ↔ 底层 PaddleOCR-VL 服务）**：官方 Self-hosted 模式通过
+  HTTP(S) 调用自托管服务——环境变量 `PADDLEOCR_MCP_SELF_HOSTED_BASE_URL`（或最新版
+  `PADDLEOCR_MCP_SERVER_URL`），**不含路径后缀**（如 `http://127.0.0.1:8080`），
+  由 MCP 按产线自动追加 `/layout-parsing`。本项目 8080 服务与官方协议完全一致
+  （同样 `POST /layout-parsing`、camelCase 参数、`file` 支持 URL/base64/本机路径、
+  `fileType` 0=PDF/1=图片），因此：
+
+  1. **官方 paddleocr-mcp 直接对接本项目后端**：部署官方进程时设
+     `PADDLEOCR_MCP_PPOCR_SOURCE=self_hosted`、
+     `PADDLEOCR_MCP_SELF_HOSTED_BASE_URL=http://服务器IP:8080`（需按官方文档选择
+     `PADDLEOCR_MCP_PIPELINE=PaddleOCR-VL`），即得到与官方环境完全一致的
+     stdio/HTTP 双传输 MCP 服务。
+  2. **本项目内置 MCP 的地址可复用官方变量名**：`get_api_url()` 会按
+     `PADDLEOCR_API_URL` → `PADDLEOCR_MCP_SELF_HOSTED_BASE_URL` →
+     `PADDLEOCR_MCP_SERVER_URL` → 配置文件的顺序解析后端地址，按官方文档
+     方式设置环境变量同样生效。
 
 ## 常见问题（FAQ）
 

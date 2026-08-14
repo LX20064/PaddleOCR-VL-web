@@ -13,9 +13,12 @@ PaddleOCR-VL 文档解析网页界面（Web UI + MCP 双模式）
   - 【临时产线覆盖】扫描页面可临时覆盖产线参数，仅对当前这一次扫描生效
   - 请求排队（队列）；实时把进度与排队计数写入 logs/status.json 供管理后台展示
   - 服务软开关：总开关 / 网页子开关 / MCP 子开关（管理后台控制，即时生效）
-  - 内置 MCP 服务器（独立入口函数，受 MCP 子开关单独控制）：
-    http://<IP>:7860/gradio_api/mcp/ ，Agent 调用时文件请传 base64 data URI
-    （或公网 http(s) URL；本机/内网 URL 会被 Gradio SSRF 防护拦截）
+  - 内置 MCP 服务器（受 MCP 子开关单独控制）：
+    http://<IP>:7860/gradio_api/mcp/ ，工具 paddleocr_vl 与官方 PaddleOCR MCP
+    协议兼容（签名 input_data / output_mode / file_type / return_images /
+    runtime_params，官方 22 键 runtime_params 全部接受）。
+    Agent 调用时文件可传 HTTP(S) URL（公网/内网/本机均可，由本进程下载）、
+    服务器本机绝对路径或 base64 data URI。
 
 开关与默认值来源：web_config.json（由管理后台 admin.py 维护）。
 环境变量（可选）：
@@ -873,62 +876,298 @@ def _to_canonical(ui):
     )
 
 
-def _mcp_defaults():
-    """返回 MCP 入口使用的后端默认参数（与 _parse_core 顺序一致）。
+# ==================== 官方 PaddleOCR MCP 协议兼容层 ====================
+# 官方 paddleocr_mcp（FastMCP）的 paddleocr_vl 工具：
+#   paddleocr_vl(input_data, output_mode="simple", file_type=None,
+#                return_images=True, runtime_params=None)
+#   - input_data: 公网 URL / 服务器本机绝对路径 / base64 data URI
+#   - output_mode: "simple"（纯 Markdown）| "detailed"（追加 "Pages: N"）
+#   - file_type: 0=PDF，1=图片，None=自动判断
+#   - return_images: True 时图片随结果返回（本项目以 data URI 内嵌进 Markdown）
+#   - runtime_params: 官方 22 键（snake_case）产线参数，未给出的键取官方默认值
+# 本实现保持工具名 / 参数名 / 返回格式与官方一致；Gradio 内置 MCP 无法像官方
+# FastMCP 那样把 <img> 拆成独立的 ImageContent，故图片以 base64 data URI 内嵌
+# 进 Markdown 文本（MCP 客户端渲染 Markdown 时可直接显示）。
+_OFFICIAL_RUNTIME_KEYS = (
+    "use_doc_orientation_classify", "use_doc_unwarping",
+    "use_layout_detection", "use_chart_recognition", "use_seal_recognition",
+    "use_ocr_for_image_block", "layout_threshold", "layout_nms",
+    "layout_unclip_ratio", "layout_merge_bboxes_mode", "layout_shape_mode",
+    "prompt_label", "format_block_content", "repetition_penalty",
+    "temperature", "top_p", "min_pixels", "max_pixels", "max_new_tokens",
+    "vlm_extra_args", "merge_layout_blocks", "markdown_ignore_labels",
+)
+# 官方未显式设置默认值的键由服务端决定（layout_nms / layout_unclip_ratio /
+# layout_merge_bboxes_mode / layout_shape_mode / vlm_extra_args /
+# markdown_ignore_labels 本项目未实现，一律忽略）；以下键按官方 params.py
+# 与服务端惯例取默认。
+_OFFICIAL_DEFAULT_PARAMS = {
+    "use_doc_orientation_classify": False,
+    "use_doc_unwarping": False,
+    "use_chart_recognition": True,
+    "use_seal_recognition": True,
+    "use_layout_detection": True,
+    "merge_layout_blocks": True,
+}
 
-    MCP 只暴露 file_path 一个参数，其余 16 个产线参数统一采用管理后台
-    「默认设置」中保存的后端默认值，与官方 PaddleOCR MCP 的 paddleocr_vl
-    工具调用习惯保持一致。
+
+def _mcp_runtime_to_params16(runtime_params):
+    """官方 22 键 runtime_params（snake_case）→ 项目 16 参数元组（_parse_core 顺序）。
+
+    runtime_params 支持 dict 或 JSON 字符串；未给出的键回落官方默认值（对齐官方
+    行为），官方独有而本项目未实现的 6 个键（layout_nms 等）直接忽略。
     """
-    d = load_config()["defaults"]
+    rp = _OFFICIAL_DEFAULT_PARAMS.copy()
+    if isinstance(runtime_params, str) and runtime_params.strip():
+        try:
+            runtime_params = json.loads(runtime_params)
+        except (json.JSONDecodeError, TypeError):
+            runtime_params = None
+    if isinstance(runtime_params, dict):
+        rp.update(
+            {k: v for k, v in runtime_params.items() if k in _OFFICIAL_RUNTIME_KEYS}
+        )
     return (
-        int(d.get("max_pixels", 0) or 0),
-        bool(d.get("use_seal", False)),
-        bool(d.get("use_chart", False)),
-        bool(d.get("use_orientation", False)),
-        bool(d.get("use_unwarping", False)),
-        bool(d.get("use_ocr_image_block", False)),   # ov_ocr_image_block
-        bool(d.get("use_format_block", False)),      # ov_format_block
-        bool(d.get("use_layout_mode", True)),        # ov_layout_mode
-        "",                                          # ov_prompt_label
-        bool(d.get("use_merge_blocks", True)),       # ov_merge_blocks
-        None,    # ov_layout_threshold
-        None,    # ov_min_pixels
-        None,    # ov_max_new_tokens
-        None,    # ov_temperature
-        None,    # ov_top_p
-        None,    # ov_repetition_penalty
+        int(rp.get("max_pixels", 0) or 0),                     # max_pixels
+        bool(rp.get("use_seal_recognition", False)),           # ov_seal
+        bool(rp.get("use_chart_recognition", True)),           # ov_chart
+        bool(rp.get("use_doc_orientation_classify", False)),   # ov_orientation
+        bool(rp.get("use_doc_unwarping", False)),              # ov_unwarping
+        bool(rp.get("use_ocr_for_image_block", False)),        # ov_ocr_image_block
+        bool(rp.get("format_block_content", False)),           # ov_format_block
+        bool(rp.get("use_layout_detection", True)),            # ov_layout_mode
+        (rp.get("prompt_label") or "").strip(),                # ov_prompt_label
+        bool(rp.get("merge_layout_blocks", True)),             # ov_merge_blocks
+        rp.get("layout_threshold"),                            # ov_layout_threshold
+        rp.get("min_pixels"),                                  # ov_min_pixels
+        rp.get("max_new_tokens"),                              # ov_max_new_tokens
+        rp.get("temperature"),                                 # ov_temperature
+        rp.get("top_p"),                                       # ov_top_p
+        rp.get("repetition_penalty"),                          # ov_repetition_penalty
     )
 
 
-def paddleocr_vl(file_path):
-    """使用 PaddleOCR-VL 对文档图像或 PDF 进行版面解析，返回 Markdown。
+def _mcp_input_to_file(input_data, file_type):
+    """官方兼容的输入归一化 → (file_b64, file_type)。
 
-    用于从文档图像（jpg/png/bmp/tiff/webp）或 PDF 文件中提取文本、表格、公式、
-    印章与图表等内容，并将整份文档转换为 Markdown 文本。
+    始终返回 base64 字符串（后端 /layout-parsing 仅接受 base64 形式的 file）：
+      - HTTP(S) URL（公网/内网/本机均可）：由本进程下载后编码，不受 Gradio
+        SSRF 防护限制（官方 self-hosted 的 file 同样支持 URL 形式）；
+      - 服务器本机绝对路径：直接读取编码；
+      - base64 data URI：提取 payload 部分；
+      - 纯 base64：按文件头嗅探类型后原样返回。
+    file_type 为 None 时按扩展名 / 内容嗅探自动判断（0=PDF，1=图片）。
+    """
+    s = str(input_data or "").strip()
+    if not s:
+        raise gr.Error("input_data 不能为空：请提供 HTTP(S) URL / 本机路径 / base64 data URI。")
+    if s.startswith(("http://", "https://")):
+        from urllib.parse import urlparse
+        ext = os.path.splitext(urlparse(s).path)[1].lower()
+        ft = 0 if ext == ".pdf" else (1 if ext in IMAGE_EXTS else None)
+        if file_type is not None:
+            ft = int(file_type)
+        if ft is None:
+            raise gr.Error("无法判断文件类型：请显式传 file_type（0=PDF，1=图片）。")
+        try:
+            r = requests.get(s, timeout=get_timeout())
+        except requests.RequestException as e:
+            raise gr.Error(f"下载失败：{s}\n原因：{e}")
+        if r.status_code != 200:
+            raise gr.Error(f"下载失败：HTTP {r.status_code}（{s}）")
+        b64 = base64.b64encode(r.content).decode("ascii")
+        return b64, ft
+    if s.startswith("data:"):
+        m = re.match(r"data:([^;,]+)", s)
+        mime = m.group(1).lower() if m else ""
+        b64 = s.split(",", 1)[1] if "," in s else ""
+        ft = 0 if "pdf" in mime else 1
+        if file_type is not None:
+            ft = int(file_type)
+        return b64, ft
+    if os.path.isfile(s):
+        ext = os.path.splitext(s)[1].lower()
+        ft = 0 if ext == ".pdf" else (1 if ext in IMAGE_EXTS else None)
+        if file_type is not None:
+            ft = int(file_type)
+        if ft is None:
+            raise gr.Error(f"不支持的文件类型：{ext or '(无扩展名)'}，请上传图片或 PDF。")
+        b64 = base64.b64encode(Path(s).read_bytes()).decode("ascii")
+        return b64, ft
+    # 纯 base64 兜底（无前缀）：按文件头嗅探
+    ft = None
+    try:
+        head = base64.b64decode(s[:128]) if s else b""
+        if head.startswith(b"%PDF"):
+            ft = 0
+        elif head.startswith((b"\xff\xd8", b"\x89PNG", b"GIF8", b"BM",
+                              b"II*\x00", b"MM\x00*", b"RIFF")):
+            ft = 1
+    except Exception:
+        pass
+    if file_type is not None:
+        ft = int(file_type)
+    if ft is None:
+        raise gr.Error("无法判断文件类型：请提供 base64 data URI 或显式传 file_type（0=PDF，1=图片）。")
+    return s, ft
+
+
+def _embed_mcp_images(markdown, images):
+    """把 Markdown 中 <img src="相对路径"> 替换为 base64 data URI。
+
+    官方实现把图片以独立 ImageContent 返回；Gradio 内置 MCP 无法交错输出文本与
+    图片，故采用 data URI 内嵌，客户端渲染 Markdown 时可直接显示图片。
+    """
+    for rel_path, b64 in images.items():
+        markdown = markdown.replace(f'src="{rel_path}"', f'src="{_image_data_uri(b64)}"')
+    return markdown
+
+
+def _parse_mcp(input_data, file_type, return_images, runtime_params):
+    """官方协议的解析流程：门控 → 输入归一化 → 调用产线 API → 官方格式结果。
+
+    返回 (markdown_text, page_count, images)：
+      - markdown_text: 各页 Markdown 以 "\\n" 拼接（与官方一致，PDF 不做合并）
+      - page_count: 页数（detailed 模式据此追加 "Pages: N"）
+      - images: {相对路径: base64}，供 return_images=True 时内嵌 data URI
+    """
+    _ensure_enabled("mcp")
+    _file_tag = str(input_data)[:60] or "(MCP)"
+    print(f"[PaddleOCR-VL] MCP 开始处理：{_file_tag}", flush=True)
+    status_update(
+        {"state": "busy", "file": _file_tag, "progress": 0.0, "desc": "MCP 解析开始"},
+        bumps={"submitted": 1, "started": 1},
+    )
+    try:
+        payload_file, ft = _mcp_input_to_file(input_data, file_type)
+        (max_pixels, seal, chart, orient, unwarp, ocrblk, fmtblk, layout,
+         prompt, merge, thr, minpix, ctx, temp, topp, rep) = _mcp_runtime_to_params16(
+            runtime_params
+        )
+
+        payload = {
+            "file": payload_file,
+            "fileType": ft,
+            "useDocOrientationClassify": bool(orient),
+            "useDocUnwarping": bool(unwarp),
+            "useSealRecognition": bool(seal),
+            "useChartRecognition": bool(chart),
+            "useOcrForImageBlock": bool(ocrblk),
+            "formatBlockContent": bool(fmtblk),
+            "useLayoutDetection": bool(layout),
+            "mergeLayoutBlocks": bool(merge),
+            # 需要 markdown.images 图片 base64 随结果返回（渲染 / 内嵌依赖）
+            "returnMarkdownImages": bool(return_images),
+        }
+        if max_pixels and int(max_pixels) > 0:
+            payload["maxPixels"] = int(max_pixels)
+        if not layout and prompt:
+            payload["promptLabel"] = prompt
+        if thr is not None:
+            if not (0 <= float(thr) <= 1):
+                raise gr.Error("layout_threshold 须在 0~1 之间")
+            payload["layoutThreshold"] = float(thr)
+        if minpix:
+            payload["minPixels"] = int(minpix)
+        if ctx:
+            payload["maxNewTokens"] = int(ctx)
+        if temp is not None:
+            if float(temp) < 0:
+                raise gr.Error("temperature 不能为负数")
+            payload["temperature"] = float(temp)
+        if topp is not None:
+            if not (0 < float(topp) <= 1):
+                raise gr.Error("top_p 须在 (0, 1] 之间")
+            payload["topP"] = float(topp)
+        if rep is not None:
+            payload["repetitionPenalty"] = float(rep)
+
+        api_url = get_api_url()
+        try:
+            resp = _http_post(api_url, payload, get_timeout())
+        except requests.ConnectionError:
+            raise gr.Error(
+                f"无法连接 OCR 服务：{api_url}\n请确认 paddlex --serve 已在服务器上启动。"
+            )
+        except requests.Timeout:
+            raise gr.Error("请求超时：可能是文档页数过多或服务器繁忙。")
+        if resp.status_code != 200:
+            err_text = resp.text[:500]
+            if "model settings are invalid" in err_text:
+                raise gr.Error(
+                    "服务返回模型设置无效（HTTP 500）。\n服务端未加载文档预处理模型"
+                    "（方向分类 / 文本图像矫正依赖该模型）。\n请确认服务端 "
+                    "PaddleOCR-VL.yaml 中 use_doc_preprocessor 为 True 并已重启 API 服务，"
+                    "或关闭 use_doc_orientation_classify / use_doc_unwarping 后重试。"
+                )
+            raise gr.Error(f"服务返回 HTTP {resp.status_code}：{err_text}")
+        data = resp.json()
+        if data.get("errorCode") != 0:
+            raise gr.Error(f"解析失败：{data.get('errorMsg')}")
+
+        # 与官方 http_result_parsers 一致：逐页取 markdown.text，以 "\n" 拼接（PDF 不合并）
+        pages = data["result"]["layoutParsingResults"]
+        md_parts, images = [], {}
+        for p in pages:
+            md = p.get("markdown") or {}
+            md_parts.append((md.get("text") or "").strip().replace("\\n", "\n"))
+            images.update(md.get("images") or {})
+        markdown = "\n".join(md_parts)
+        if not markdown.strip():
+            markdown = "No document content detected"  # 与官方一致：返回提示文本而非报错
+        status_update(
+            {"state": "idle", "progress": 1.0, "desc": f"最近完成：{_file_tag}"},
+            bumps={"done": 1},
+        )
+        print(f"[PaddleOCR-VL] MCP 完成：{_file_tag}", flush=True)
+        return markdown, len(pages), images
+    except Exception:
+        status_update(
+            {"state": "idle", "progress": 1.0, "desc": f"最近任务失败：{_file_tag}"},
+            bumps={"done": 1, "failed": 1},
+        )
+        raise
+
+
+def paddleocr_vl(input_data=None, file_path=None, output_mode="simple",
+                 file_type=None, return_images=True, runtime_params=None):
+    """使用 PaddleOCR-VL 对文档图像或 PDF 进行版面解析，返回 Markdown 文本。
+
+    与官方 PaddleOCR MCP 的 paddleocr_vl 工具保持兼容（工具名、参数名、返回格式）。
 
     Args:
-        file_path: 待解析的文档图像或 PDF 文件。支持两种形式：
-            1) 公网 http(s) URL（注意：本机/内网地址会被 SSRF 防护拦截，
-               含 upload_file_to_gradio 返回的同机 URL，不可用）；
-            2) base64 data URI（data:image/png;base64,...），本地文件请先编码。
+        input_data: 待解析的文档图像或 PDF 文件，支持三种形式（与官方一致）：
+            1) HTTP(S) URL——公网 / 内网 / 本机地址均可（由本服务下载后解析，
+               不受 Gradio SSRF 防护限制）；
+            2) 服务器本机绝对路径，如 /home/user/scan.png；
+            3) base64 data URI（data:image/png;base64,...）。
+        file_path: 旧版参数名，与 input_data 等价（向后兼容，二选一即可）。
+        output_mode: "simple" 仅返回 Markdown 文本；"detailed" 额外追加
+            "Pages: N"（N 为解析得到的页数）。
+        file_type: 0=PDF，1=图片；None 时按文件自动判断。
+        return_images: 为 True 时 Markdown 中的图片以 base64 data URI 内嵌返回。
+        runtime_params: 官方产线参数（snake_case 键，支持全部 22 个键），
+            传 JSON 对象或 JSON 字符串，例如
+            {"use_doc_orientation_classify": true, "layout_threshold": 0.5}。
+            未给出的键取官方默认值。
 
     Returns:
-        三元组 (状态信息, Markdown 文本, 可下载的结果文件)。
+        Markdown 文本；detailed 模式下末尾追加 "Pages: N"（N 为解析得到的页数）。
     """
-    # MCP 入口使用非生成器版本，避免 MCP 协议对生成器的兼容问题；
-    # 仅暴露 file_path 一个参数，其余走后端默认值（见 _mcp_defaults）。
+    # MCP 入口用独立解析流程（对齐官方返回格式），不经网页的 _parse_core 生成器
+    # 注：Gradio 内置 MCP 在排队（queue）模式下会把多输出组件打包成单个文本，
+    # 故这里把 Markdown 与 "Pages: N" 合并为一个字符串返回（最终文本与官方
+    # [markdown, "Pages: N"] 两个文本段拼接后的内容一致）。
     _stop_event.clear()   # MCP 调用与网页「停止」按钮无关，起始即清除残留标志
-    result = _consume_generator(_guarded_entry("mcp", file_path, *_mcp_defaults()))
-    return result[:3] if isinstance(result, (tuple, list)) else result
-
-
-def _consume_generator(gen):
-    """消费生成器，返回最后一个 yield 值。用于 MCP 入口获取最终结果。"""
-    result = None
-    for result in gen:
-        pass
-    return result
+    src = input_data if input_data not in (None, "") else file_path
+    markdown, page_count, images = _parse_mcp(
+        src, file_type, return_images, runtime_params
+    )
+    if return_images and images:
+        markdown = _embed_mcp_images(markdown, images)
+    if output_mode == "detailed":
+        markdown = f"{markdown}\n\nPages: {page_count}"
+    return markdown
 
 
 # ==================== 批量识别 / 界面辅助 ====================
@@ -2539,6 +2778,18 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
     # MCP 隐藏入口（受 mcp 子开关控制；Agent 调用 paddleocr_vl 时传文件）
     file_input = gr.File(visible=False, file_count="single", type="filepath")
     mcp_btn = gr.Button(visible=False)
+    # MCP 官方协议兼容参数（隐藏，仅供 Agent 调用 paddleocr_vl 时传参，网页不可见）
+    # input_data 用 Textbox（纯字符串），与官方协议一致：HTTP(S) URL / 本机绝对路径 /
+    # base64 data URI 均可直接传入，由本进程负责下载/读取（不经 Gradio 下载，
+    # 因此不受 Gradio SSRF 防护限制，内网/本机地址同样可用）。
+    input_data_cb = gr.Textbox(value=None, visible=False)
+    file_path_alt = gr.File(visible=False, file_count="single", type="filepath")  # 旧版参数名 file_path 别名
+    output_mode_cb = gr.Dropdown(choices=["simple", "detailed"], value="simple", visible=False)
+    file_type_cb = gr.Number(value=None, visible=False)   # 0=PDF，1=图片，None=自动
+    return_images_cb = gr.Checkbox(value=True, visible=False)
+    runtime_params_cb = gr.Textbox(
+        value=None, visible=False, placeholder='{"use_chart_recognition": true, ...}',
+    )  # 官方 22 键 runtime_params（JSON 对象或 JSON 字符串）
     # 隐藏的下载目标：各导出按钮把生成的文件路径写入此 DownloadButton，
     # 再由前端 _AUTO_DL_JS 模拟点击其内部 <button> 触发浏览器下载。
     # 与「下载 Markdown」触发按钮分离，避免同一个按钮既触发导出又被自动点击。
@@ -2960,11 +3211,15 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
         js="(e) => confirm('确定恢复全部默认设置？当前参数将被重置。') ? e : null",
         api_visibility="private")
 
-    # ---- MCP 入口：隐藏按钮，Agent 调用 paddleocr_vl（仅暴露文件一个参数） ----
+    # ---- MCP 入口：隐藏按钮，Agent 调用 paddleocr_vl（官方协议签名） ----
+    # inputs 顺序 = paddleocr_vl 签名参数顺序；input_data 走 Textbox（URL/路径/
+    # data URI 纯字符串，由 _parse_mcp 下载/读取），file_path 为旧版别名组件；
+    # 单输出 md_out（Markdown 文本，detailed 时末尾已追加 "Pages: N"）。
     mcp_btn.click(
         paddleocr_vl,
-        inputs=[file_input],
-        outputs=[status_bar, md_out, dl_target],
+        inputs=[input_data_cb, file_path_alt, output_mode_cb, file_type_cb,
+                return_images_cb, runtime_params_cb],
+        outputs=[md_out],
         api_name="paddleocr_vl",
     )
 
