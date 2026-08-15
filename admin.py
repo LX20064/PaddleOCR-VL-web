@@ -23,6 +23,7 @@ PaddleOCR-VL 管理后台（admin.py，默认 7861 端口）
 """
 
 import datetime
+import json
 import os
 import subprocess
 import sys
@@ -64,6 +65,65 @@ def _log(msg):
     print(f"[{datetime.datetime.now():%Y-%m-%d %H:%M:%S}] [admin] {msg}", flush=True)
 
 
+# ---- 版面后处理高级参数：UI ↔ 配置值转换（与扫描页 web_ocr.py 约定一致） ----
+_ADMIN_OPT_NONE = "留空"
+_ADMIN_OPT_ON = "开启"
+_ADMIN_OPT_OFF = "关闭"
+
+
+def _tri_bool_val(v):
+    """「留空/开启/关闭」→ None/True/False。"""
+    if v in (None, _ADMIN_OPT_NONE, ""):
+        return None
+    return str(v) == _ADMIN_OPT_ON
+
+
+def _tri_bool_ui(v):
+    """None/True/False → 「留空/开启/关闭」。"""
+    if v is None:
+        return _ADMIN_OPT_NONE
+    return _ADMIN_OPT_ON if bool(v) else _ADMIN_OPT_OFF
+
+
+def _parse_extra_text(text):
+    """高级参数文本框 → Python 值：空/留空 → None；JSON 优先，否则视为裸字符串。"""
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s or s == _ADMIN_OPT_NONE:
+        return None
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return s
+
+
+def _extra_text_ui(v):
+    """Python 值 → 高级参数文本框内容（None→空，字符串原样，其余 JSON 序列化）。"""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _shape_mode_ui(v):
+    """layout_shape_mode → 下拉框值（None→留空，其余原样字符串）。"""
+    return _ADMIN_OPT_NONE if v in (None, "") else str(v)
+
+
+def _extra_default_updates(d):
+    """返回 6 个版面后处理高级参数的默认更新值（与 UI 组件顺序一致）。"""
+    return (
+        gr.update(value=_tri_bool_ui(d.get("layout_nms"))),
+        gr.update(value=_extra_text_ui(d.get("layout_unclip_ratio"))),
+        gr.update(value=_extra_text_ui(d.get("layout_merge_bboxes_mode"))),
+        gr.update(value=_shape_mode_ui(d.get("layout_shape_mode"))),
+        gr.update(value=_extra_text_ui(d.get("vlm_extra_args"))),
+        gr.update(value=_extra_text_ui(d.get("markdown_ignore_labels"))),
+    )
+
+
 def do_login(password: str):
     """校验密码，成功后显示管理面板并载入当前配置。
     密码错误时返回页面内错误提示，不抛出 gr.Error，避免必须刷新页面。"""
@@ -80,6 +140,7 @@ def do_login(password: str):
             gr.update(), gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(),
+            *([gr.update()] * 6),  # 版面后处理高级参数（未登录不更新）
             gr.update(value="⚠️ **密码错误**，请重新输入。"),
             gr.update(value=False),  # login_state
         )
@@ -100,6 +161,7 @@ def do_login(password: str):
         d.get("pdf_per_page", False), d.get("export_chart", False),
         d.get("max_pixels", 0),
         d.get("cache_keep_days", 3), d.get("vl_precision", "q5_k_m"),
+        *_extra_default_updates(d),
         gr.update(value=""),               # 清空错误提示
         gr.update(value=True),            # login_state → 已登录
     )
@@ -118,6 +180,7 @@ def _restore_login(login_state):
             gr.update(), gr.update(), gr.update(), gr.update(),
             gr.update(), gr.update(),
             gr.update(), gr.update(), gr.update(),
+            *([gr.update()] * 6),  # 版面后处理高级参数（未登录不更新）
             gr.update(value=""),
             gr.update(value=False),
         )
@@ -138,6 +201,7 @@ def _restore_login(login_state):
         d.get("pdf_per_page", False), d.get("export_chart", False),
         d.get("max_pixels", 0),
         d.get("cache_keep_days", 3), d.get("vl_precision", "q5_k_m"),
+        *_extra_default_updates(d),
         gr.update(value=""),               # 清空错误提示
         gr.update(value=True),
     )
@@ -156,6 +220,7 @@ def do_logout():
         gr.update(), gr.update(), gr.update(), gr.update(),
         gr.update(), gr.update(),
         gr.update(), gr.update(), gr.update(),
+        *([gr.update()] * 6),  # 版面后处理高级参数（退出登录不更新）
         gr.update(value=""),               # 清空错误提示
         gr.update(value=False),           # login_state → 未登录
         gr.update(value=""),              # 清空密码框
@@ -271,7 +336,9 @@ def reset_stats(logged_in):
 def save_defaults(api_url, timeout, max_parallel, orientation, unwarping, seal, chart,
                   layout_mode, merge_blocks, ocr_image_block, format_block,
                   pdf_per_page, export_chart,
-                  max_pixels, cache_days, vl_precision, logged_in):
+                  max_pixels, cache_days, vl_precision,
+                  layout_nms, layout_unclip, layout_merge, layout_shape,
+                  vlm_extra, md_ignore, logged_in):
     _require_login(logged_in)
     cfg = load_config()
     api_url = (api_url or "").strip()
@@ -294,6 +361,12 @@ def save_defaults(api_url, timeout, max_parallel, orientation, unwarping, seal, 
         "max_pixels": int(max_pixels),
         "cache_keep_days": max(1, int(cache_days)),
         "vl_precision": str(vl_precision or "q5_k_m"),
+        "layout_nms": _tri_bool_val(layout_nms),
+        "layout_unclip_ratio": _parse_extra_text(layout_unclip),
+        "layout_merge_bboxes_mode": _parse_extra_text(layout_merge),
+        "layout_shape_mode": _parse_extra_text(layout_shape),
+        "vlm_extra_args": _parse_extra_text(vlm_extra),
+        "markdown_ignore_labels": _parse_extra_text(md_ignore),
     }
     # 确保配置文件中所有默认值键都存在
     for key, default_val in DEFAULT_CONFIG["defaults"].items():
@@ -827,6 +900,33 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
                             )
                             cache_clear_btn = gr.Button("立即清理缓存", variant="secondary")
                         cache_msg = gr.Markdown()
+                        gr.Markdown("**版面后处理默认值（高级）**")
+                        with gr.Row():
+                            d_layout_nms = gr.Dropdown(
+                                choices=["留空", "开启", "关闭"],
+                                value="留空", label="版面框 NMS",
+                                info="对重叠的版面检测框做非极大值抑制")
+                            d_layout_shape = gr.Dropdown(
+                                choices=["留空", "rect", "quad", "poly", "auto"],
+                                value="留空", label="版面框形状模式（shape_mode）")
+                        with gr.Row():
+                            d_layout_unclip = gr.Textbox(
+                                label="版面框扩张比例（unclip_ratio）",
+                                placeholder='留空或 2.0 / {"bbox": [2.0, 2.0]}',
+                                info="数值或 JSON 对象；留空使用后端默认")
+                            d_layout_merge = gr.Textbox(
+                                label="版面框合并模式（merge_bboxes_mode）",
+                                placeholder='留空或 union / large / small / {"box": "union"}',
+                                info="字符串或 JSON 对象；留空使用后端默认")
+                        with gr.Row():
+                            d_vlm_extra = gr.Textbox(
+                                label="VLM 额外采样参数（vlm_extra_args）",
+                                placeholder='留空或 {"temperature": 0.7}',
+                                info="JSON 对象；留空使用后端默认")
+                            d_md_ignore = gr.Textbox(
+                                label="Markdown 忽略标签（ignore_labels）",
+                                placeholder='留空或 ["number", "footnote"]',
+                                info="JSON 数组；留空使用后端默认")
                         save_btn = gr.Button("保存设置", variant="primary")
                         save_msg = gr.Markdown()
 
@@ -872,6 +972,8 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
         d_layout_mode, d_merge_blocks, d_ocr_image_block, d_format_block,
         d_pdf_per_page, d_export_chart,
         d_max_pixels, d_cache_days, vl_precision,
+        d_layout_nms, d_layout_unclip, d_layout_merge,
+        d_layout_shape, d_vlm_extra, d_md_ignore,
         login_msg,
         login_state,
     ]
@@ -924,7 +1026,9 @@ with gr.Blocks(title="PaddleOCR-VL 管理后台") as app:
                 d_orientation, d_unwarping, d_seal, d_chart,
                 d_layout_mode, d_merge_blocks, d_ocr_image_block, d_format_block,
                 d_pdf_per_page, d_export_chart,
-                d_max_pixels, d_cache_days, vl_precision, login_state],
+                d_max_pixels, d_cache_days, vl_precision,
+                d_layout_nms, d_layout_unclip, d_layout_merge,
+                d_layout_shape, d_vlm_extra, d_md_ignore, login_state],
         outputs=save_msg,
         api_visibility="private",
     )

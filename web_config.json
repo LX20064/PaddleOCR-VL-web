@@ -21,6 +21,12 @@
     "export_chart": false,
     "max_pixels": 0,
     "cache_keep_days": 3,
-    "vl_precision": "q5_k_m"
+    "vl_precision": "q5_k_m",
+    "layout_nms": null,
+    "layout_unclip_ratio": null,
+    "layout_merge_bboxes_mode": null,
+    "layout_shape_mode": null,
+    "vlm_extra_args": null,
+    "markdown_ignore_labels": null
   }
 }

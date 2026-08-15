@@ -329,6 +329,25 @@ def _ensure_enabled(channel: str) -> None:
 
 # ==================== 核心解析逻辑 ====================
 
+def _extra_params_to_payload(layout_nms, layout_unclip_ratio,
+                             layout_merge_bboxes_mode, layout_shape_mode,
+                             vlm_extra_args, markdown_ignore_labels):
+    """6 个版面后处理高级参数（Python 值）→ 后端 camelCase 请求字段。
+
+    None 表示「使用后端/产线默认值」，故不输出该字段；其余值直接透传，
+    与 MCP 层 _mcp_runtime_to_extra_params 使用同一套 camelCase 映射。
+    """
+    fields = {
+        "layoutNms": layout_nms,
+        "layoutUnclipRatio": layout_unclip_ratio,
+        "layoutMergeBboxesMode": layout_merge_bboxes_mode,
+        "layoutShapeMode": layout_shape_mode,
+        "vlmExtraArgs": vlm_extra_args,
+        "markdownIgnoreLabels": markdown_ignore_labels,
+    }
+    return {k: v for k, v in fields.items() if v is not None}
+
+
 def _parse_core(
     file_path,
     max_pixels,
@@ -338,6 +357,9 @@ def _parse_core(
     ov_layout_mode, ov_prompt_label, ov_merge_blocks,
     ov_layout_threshold, ov_min_pixels, ov_max_new_tokens,
     ov_temperature, ov_top_p, ov_repetition_penalty,
+    # ---- 版面后处理高级参数（None = 后端默认） ----
+    ov_layout_nms, ov_layout_unclip_ratio, ov_layout_merge_bboxes_mode,
+    ov_layout_shape_mode, ov_vlm_extra_args, ov_markdown_ignore_labels,
     export_mode=None,
     per_page=False,
     export_chart=False,
@@ -432,6 +454,11 @@ def _parse_core(
         payload["topP"] = float(ov_top_p)
     if ov_repetition_penalty is not None:
         payload["repetitionPenalty"] = float(ov_repetition_penalty)
+    # 版面后处理高级参数（layout_* / vlm_extra_args / markdown_ignore_labels）
+    payload.update(_extra_params_to_payload(
+        ov_layout_nms, ov_layout_unclip_ratio, ov_layout_merge_bboxes_mode,
+        ov_layout_shape_mode, ov_vlm_extra_args, ov_markdown_ignore_labels,
+    ))
     # ---------- 调用后端服务 ----------
     _prog(0.2, "服务器解析中（大图 / 多页 PDF 可能需要几分钟）…")
     yield _status_yield(0.2, "服务器解析中（大图 / 多页 PDF 可能需要几分钟）…")
@@ -843,15 +870,20 @@ def _guarded_entry(channel, *args):
 
 
 # ==================== 参数顺序转换（UI → 后端） ====================
-# UI 组件的统一顺序（16 个核心参数），与 _parse_core 一一对应：
+# UI 组件的统一顺序（22 个核心参数），与 _parse_core 一一对应：
 #   0 max_pixels(显存占用比)
 #   1 seal | 2 chart | 3 orientation | 4 unwarping | 5 ocr_image_block | 6 format_block
 #   7 layout_mode | 8 prompt_label | 9 merge_blocks
 #   10 layout_threshold | 11 min_pixels | 12 max_new_tokens | 13 temperature
 #   14 top_p | 15 repetition_penalty
+#   16 layout_nms | 17 layout_unclip_ratio | 18 layout_merge_bboxes_mode
+#   19 layout_shape_mode | 20 vlm_extra_args | 21 markdown_ignore_labels
 #   导出模式（export_mode）不再由前端参数控制，而是各导出按钮直接传参
 _OPT_NONE = "留空"
 _VRAM_NONE = "不限制"
+_OPT_ON = "开启"
+_OPT_OFF = "关闭"
+_N_CORE = 22
 
 
 def _opt_int(v, none_marker=_OPT_NONE):
@@ -862,11 +894,53 @@ def _opt_float(v, none_marker=_OPT_NONE):
     return None if v in (None, none_marker, "") else float(v)
 
 
+def _tri_bool_val(v):
+    """「留空/开启/关闭」→ None/True/False。"""
+    if v in (None, _OPT_NONE, ""):
+        return None
+    return str(v) == _OPT_ON
+
+
+def _tri_bool_ui(v):
+    """None/True/False → 「留空/开启/关闭」。"""
+    if v is None:
+        return _OPT_NONE
+    return _OPT_ON if bool(v) else _OPT_OFF
+
+
+def _parse_extra_text(text):
+    """高级参数文本框 → Python 值：空/留空 → None；JSON 优先，否则视为裸字符串。"""
+    if text is None:
+        return None
+    s = str(text).strip()
+    if not s or s == _OPT_NONE:
+        return None
+    try:
+        return json.loads(s)
+    except (json.JSONDecodeError, TypeError):
+        return s
+
+
+def _extra_text_ui(v):
+    """Python 值 → 高级参数文本框内容（None→空，字符串原样，其余 JSON 序列化）。"""
+    if v is None:
+        return ""
+    if isinstance(v, str):
+        return v
+    return json.dumps(v, ensure_ascii=False)
+
+
+def _shape_mode_ui(v):
+    """layout_shape_mode → 下拉框值（None→留空，其余原样字符串）。"""
+    return _OPT_NONE if v in (None, "") else str(v)
+
+
 def _to_canonical(ui):
-    """把 UI 顺序的 16 个核心参数转换为 _parse_core 需要的顺序。"""
+    """把 UI 顺序的 22 个核心参数转换为 _parse_core 需要的顺序。"""
     (vram, seal, chart, orient, unwarp,
      ocrblk, fmtblk, layout, prompt, merge, thr, minpix, ctx,
-     temp, topp, rep) = ui
+     temp, topp, rep,
+     nms, unclip, merge_mode, shape_mode, vlm_extra, md_ignore) = ui
     return (
         _opt_int(vram, _VRAM_NONE) or 0,
         bool(seal), bool(chart), bool(orient), bool(unwarp),
@@ -875,6 +949,12 @@ def _to_canonical(ui):
         bool(merge),
         _opt_float(thr), _opt_int(minpix), _opt_int(ctx),
         _opt_float(temp), _opt_float(topp), _opt_float(rep),
+        _tri_bool_val(nms),
+        _parse_extra_text(unclip),
+        _parse_extra_text(merge_mode),
+        _parse_extra_text(shape_mode),
+        _parse_extra_text(vlm_extra),
+        _parse_extra_text(md_ignore),
     )
 
 
@@ -899,10 +979,10 @@ _OFFICIAL_RUNTIME_KEYS = (
     "temperature", "top_p", "min_pixels", "max_pixels", "max_new_tokens",
     "vlm_extra_args", "merge_layout_blocks", "markdown_ignore_labels",
 )
-# 官方未显式设置默认值的键由服务端决定（layout_nms / layout_unclip_ratio /
+# 官方未显式设置默认值的键由服务端决定；其中 layout_nms / layout_unclip_ratio /
 # layout_merge_bboxes_mode / layout_shape_mode / vlm_extra_args /
-# markdown_ignore_labels 本项目未实现，一律忽略）；以下键按官方 params.py
-# 与服务端惯例取默认。
+# markdown_ignore_labels 这 6 键由 _mcp_runtime_to_extra_params 单独透传，
+# 不参与下方 16 参数映射。以下键按官方 params.py 与服务端惯例取默认。
 _OFFICIAL_DEFAULT_PARAMS = {
     "use_doc_orientation_classify": False,
     "use_doc_unwarping": False,
@@ -917,7 +997,8 @@ def _mcp_runtime_to_params16(runtime_params):
     """官方 22 键 runtime_params（snake_case）→ 项目 16 参数元组（_parse_core 顺序）。
 
     runtime_params 支持 dict 或 JSON 字符串；未给出的键回落官方默认值（对齐官方
-    行为），官方独有而本项目未实现的 6 个键（layout_nms 等）直接忽略。
+    行为）。layout_nms 等 6 个键不在此 16 参数内，由 _mcp_runtime_to_extra_params
+    单独透传给后端。
     """
     rp = _OFFICIAL_DEFAULT_PARAMS.copy()
     if isinstance(runtime_params, str) and runtime_params.strip():
@@ -947,6 +1028,36 @@ def _mcp_runtime_to_params16(runtime_params):
         rp.get("top_p"),                                       # ov_top_p
         rp.get("repetition_penalty"),                          # ov_repetition_penalty
     )
+
+
+def _mcp_runtime_to_extra_params(runtime_params):
+    """官方 22 键中 6 个「此前忽略」的键 → 后端 /layout-parsing 请求字段。
+
+    后端 InferRequest（paddlex serving paddleocr_vl.py）已完整支持这些字段，
+    本函数把它们从 snake_case 运行时键映射为 camelCase 请求字段，供 _parse_mcp
+    透传。值为 None 的键不输出（由后端按产线 PaddleOCR-VL.yaml 默认值处理）。
+    """
+    if isinstance(runtime_params, str) and runtime_params.strip():
+        try:
+            runtime_params = json.loads(runtime_params)
+        except (json.JSONDecodeError, TypeError):
+            runtime_params = None
+    if not isinstance(runtime_params, dict):
+        return {}
+
+    mapping = {
+        "layout_nms": "layoutNms",
+        "layout_unclip_ratio": "layoutUnclipRatio",
+        "layout_merge_bboxes_mode": "layoutMergeBboxesMode",
+        "layout_shape_mode": "layoutShapeMode",
+        "vlm_extra_args": "vlmExtraArgs",
+        "markdown_ignore_labels": "markdownIgnoreLabels",
+    }
+    return {
+        field: runtime_params[key]
+        for key, field in mapping.items()
+        if key in runtime_params and runtime_params[key] is not None
+    }
 
 
 def _mcp_input_to_file(input_data, file_type):
@@ -1083,6 +1194,9 @@ def _parse_mcp(input_data, file_type, return_images, runtime_params):
             payload["topP"] = float(topp)
         if rep is not None:
             payload["repetitionPenalty"] = float(rep)
+        # 透传此前被忽略的 6 个官方 runtime 键（layout_* / vlm_extra_args /
+        # markdown_ignore_labels），后端 /layout-parsing 已完整支持。
+        payload.update(_mcp_runtime_to_extra_params(runtime_params))
 
         api_url = get_api_url()
         try:
@@ -1450,7 +1564,7 @@ def _mutex_pdf_mode(checked, other_checked):
 
 def _batch_run(queue, *all_ui):
     """批量识别：按队列顺序逐个解析，实时更新任务表/统计/日志/结果。"""
-    n_core = 16
+    n_core = _N_CORE
     ui_core = all_ui[:n_core]
     per_page = bool(all_ui[n_core]) if len(all_ui) > n_core else False
     export_chart = bool(all_ui[n_core + 1]) if len(all_ui) > n_core + 1 else False
@@ -1685,9 +1799,11 @@ def _export_last(mode, last_file, *ui_core_with_md):
         yield f"[{now()}] ⚠️ 没有可导出的结果，请先执行识别", "⚠️ 请先执行识别", None, None
         return
     n = len(ui_core_with_md)
-    per_page = bool(ui_core_with_md[n - 2]) if n >= 18 else False
-    export_chart = bool(ui_core_with_md[n - 1]) if n >= 19 else False
-    ui_core = list(ui_core_with_md[1:17]) if n >= 17 else list(ui_core_with_md[1:])
+    core_start = 1                      # 跳过 md_state
+    core_end = core_start + _N_CORE     # 之后依次是 pdf_per_page、export_chart
+    per_page = bool(ui_core_with_md[core_end]) if n > core_end else False
+    export_chart = bool(ui_core_with_md[core_end + 1]) if n > core_end + 1 else False
+    ui_core = list(ui_core_with_md[core_start:core_end]) if n >= core_end else list(ui_core_with_md[core_start:])
     canon = list(_to_canonical(ui_core))
     labels = {"docx": "Word", "json": "JSON", "html": "HTML", "zip_md": "Markdown 原始文件"}
     label = labels.get(mode, mode)
@@ -1740,14 +1856,14 @@ def _clear_log():
 
 
 def _restore_defaults():
-    """恢复默认参数：16 核心设置 + 状态栏。"""
+    """恢复默认参数：22 核心设置 + 状态栏。"""
     return _default_updates() + (gr.update(value="♻️ 已恢复默认参数"),)
 
 
 # ==================== 界面 ====================
 
 def _default_updates():
-    """返回设置组件的默认更新（16 个核心参数 + 2 个 PDF/图表高级选项）。"""
+    """返回设置组件的默认更新（22 个核心参数 + 2 个 PDF/图表高级选项）。"""
     d = load_config()["defaults"]
     return (
         gr.update(value="不限制" if not d.get("max_pixels")
@@ -1767,6 +1883,12 @@ def _default_updates():
         gr.update(value="留空"),                                      # ov_temperature
         gr.update(value="留空"),                                      # ov_top_p
         gr.update(value="留空"),                                      # ov_repetition_penalty
+        gr.update(value=_tri_bool_ui(d.get("layout_nms"))),           # ov_layout_nms
+        gr.update(value=_extra_text_ui(d.get("layout_unclip_ratio"))),# ov_layout_unclip_ratio
+        gr.update(value=_extra_text_ui(d.get("layout_merge_bboxes_mode"))),  # ov_layout_merge_bboxes_mode
+        gr.update(value=_shape_mode_ui(d.get("layout_shape_mode"))),  # ov_layout_shape_mode
+        gr.update(value=_extra_text_ui(d.get("vlm_extra_args"))),     # ov_vlm_extra_args
+        gr.update(value=_extra_text_ui(d.get("markdown_ignore_labels"))),  # ov_markdown_ignore_labels
         gr.update(value=bool(d.get("pdf_per_page", False))),         # PDF 每页输出单独文件
         gr.update(value=bool(d.get("export_chart", False))),         # 导出图表区域为图片
     )
@@ -3012,8 +3134,41 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
                         gr.HTML("")
                         restore_btn = gr.Button("恢复默认值", elem_classes="scan-reset-btn")
 
+                with gr.Column(elem_classes="scan-card"):
+                    with gr.Row(elem_classes="scan-card-head"):
+                        gr.HTML('<span class="scan-card-title">版面后处理（高级）</span>')
+                    layout_nms_dd = gr.Dropdown(
+                        choices=["留空", "开启", "关闭"],
+                        value=_tri_bool_ui(_cfg_defaults.get("layout_nms")),
+                        label="版面框 NMS",
+                        info="对重叠的版面检测框做非极大值抑制")
+                    layout_unclip_tb = gr.Textbox(
+                        value=_extra_text_ui(_cfg_defaults.get("layout_unclip_ratio")),
+                        label="版面框扩张比例（unclip_ratio）",
+                        placeholder='留空或 2.0 / {"bbox": [2.0, 2.0]}',
+                        info="数值或 JSON 对象；留空使用后端默认")
+                    layout_merge_tb = gr.Textbox(
+                        value=_extra_text_ui(_cfg_defaults.get("layout_merge_bboxes_mode")),
+                        label="版面框合并模式（merge_bboxes_mode）",
+                        placeholder='留空或 union / large / small / {"box": "union"}',
+                        info="字符串或 JSON 对象；留空使用后端默认")
+                    layout_shape_dd = gr.Dropdown(
+                        choices=["留空", "rect", "quad", "poly", "auto"],
+                        value=_shape_mode_ui(_cfg_defaults.get("layout_shape_mode")),
+                        label="版面框形状模式（shape_mode）")
+                    vlm_extra_tb = gr.Textbox(
+                        value=_extra_text_ui(_cfg_defaults.get("vlm_extra_args")),
+                        label="VLM 额外采样参数（vlm_extra_args）",
+                        placeholder='留空或 {"temperature": 0.7}',
+                        info="JSON 对象；留空使用后端默认")
+                    md_ignore_tb = gr.Textbox(
+                        value=_extra_text_ui(_cfg_defaults.get("markdown_ignore_labels")),
+                        label="Markdown 忽略标签（ignore_labels）",
+                        placeholder='留空或 ["number", "footnote"]',
+                        info="JSON 数组；留空使用后端默认")
+
     # ================= 事件接线 =================
-    # 16 个核心参数顺序（与 _to_canonical / _default_updates 一一对应）
+    # 22 个核心参数顺序（与 _to_canonical / _default_updates 一一对应）
     core_components = [
         vram_ratio_dd,      # 0 显存占用比 → max_pixels
         seal_cb,            # 1 印章
@@ -3031,6 +3186,12 @@ with gr.Blocks(title="PaddleOCR-VL 文档解析") as demo:
         temperature_dd,     # 13 采样温度
         topp_dd,            # 14 top_p
         rep_dd,             # 15 重复惩罚
+        layout_nms_dd,      # 16 版面框 NMS
+        layout_unclip_tb,   # 17 版面框扩张比例
+        layout_merge_tb,    # 18 版面框合并模式
+        layout_shape_dd,    # 19 版面框形状模式
+        vlm_extra_tb,       # 20 VLM 额外采样参数
+        md_ignore_tb,       # 21 Markdown 忽略标签
     ]
     core_components_with_md = [md_state] + core_components
     # 批量识别输出顺序（与 _batch_run.pack 对应）

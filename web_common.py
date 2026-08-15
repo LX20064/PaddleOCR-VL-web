@@ -54,6 +54,13 @@ DEFAULT_CONFIG = {
         "max_pixels": 0,          # 单图最大像素（0 = 不限制）
         "cache_keep_days": 3,     # 后端临时缓存（outputs/ 目录）保留天数，到期自动清理
         "vl_precision": "q5_k_m", # VL 模型量化精度（fp16 | q8_0 | q5_k_m | q4_k_m）
+        # ---- 版面后处理高级参数（None = 使用后端/产线默认值） ----
+        "layout_nms": None,                 # 版面检测 NMS（bool | None）
+        "layout_unclip_ratio": None,        # 版面框扩张比例（float | dict | None）
+        "layout_merge_bboxes_mode": None,   # 版面框合并模式（str | dict | None）
+        "layout_shape_mode": None,          # 版面框形状模式（rect|quad|poly|auto|None）
+        "vlm_extra_args": None,             # 给 VLM 引擎的额外采样参数（dict | None）
+        "markdown_ignore_labels": None,     # Markdown 忽略的块标签（list[str] | None）
     },
 }
 
