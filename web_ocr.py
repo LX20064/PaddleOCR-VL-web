@@ -2545,16 +2545,14 @@ button.scan-result-icon:disabled {
   font-weight: 600 !important;
   box-shadow: inset 0 -2px 0 var(--scan-grad-1) !important;
 }
-#md-preview .markdown-body {
-  min-height: 460px;
-  max-height: 720px;
+#rtab-pane-md,
+#rtab-pane-render,
+#rtab-pane-code {
+  height: 560px;
   overflow-y: auto;
-  padding: 8px 4px;
 }
+#rtab-pane-md,
 #rtab-pane-render {
-  min-height: 460px;
-  max-height: 720px;
-  overflow-y: auto;
   padding: 8px 4px;
 }
 #rtab-pane-render img {
