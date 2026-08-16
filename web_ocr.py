@@ -535,7 +535,7 @@ def _parse_core(
         _prog(0.8, "wordrender 本地渲染 Word…")
         yield _status_yield(0.8, "wordrender 本地渲染 Word…")
         docx_path = out_dir / f"{stem}.docx"
-        source_label = "wordrender 本地" + _md_to_docx_python(full_md, merged_images, str(docx_path))
+        _md_to_docx_python(full_md, merged_images, str(docx_path))
 
         # —— 扫码模式：生成 MD + JSON + DOCX，写入磁盘供重复下载 ——
         md_path = out_dir / f"{stem}.md"
@@ -584,7 +584,7 @@ def _parse_core(
                 status = f"✅ 已导出 Word 及图表：{len(pages)} 页，耗时 {elapsed:.1f} 秒"
                 yield status, full_md or "(无文本内容)", str(zip_path), merged_images
                 return
-            status = f"✅ 已导出 Word（{source_label}）：{len(pages)} 页，耗时 {elapsed:.1f} 秒"
+            status = f"✅ 已导出 Word：{len(pages)} 页，耗时 {elapsed:.1f} 秒"
             yield status, full_md or "(无文本内容)", str(docx_path), merged_images
             return
         elif export_mode in ("html", "json", "zip_md"):
@@ -613,7 +613,7 @@ def _parse_core(
                 for rel_path, b64 in merged_images.items():
                     zf.writestr(rel_path, base64.b64decode(b64))
                 _add_chart_crops(zf, chart_crops)
-            status = f"✅ 解析并合并完成：共 {len(pages)} 页 → 单个 Word（{source_label}），耗时 {elapsed:.1f} 秒"
+            status = f"✅ 解析并合并完成：共 {len(pages)} 页 → 单个 Word，耗时 {elapsed:.1f} 秒"
             yield status, full_md or "(无文本内容)", str(zip_path), merged_images
             return
 
@@ -699,7 +699,7 @@ def _parse_core(
 
     # 生成 DOCX（wordrender 纯 Python 离线渲染）
     docx_path = out_dir / f"{stem}.docx"
-    source_label = "wordrender 本地" + _md_to_docx_python(full_md, images, str(docx_path))
+    _md_to_docx_python(full_md, images, str(docx_path))
 
     # —— 写入 MD + JSON 到磁盘供重复下载 ——
     md_path = out_dir / f"{stem}.md"
@@ -721,7 +721,7 @@ def _parse_core(
             status = f"✅ 已导出 Word 及图表：1 页，耗时 {elapsed:.1f} 秒"
             yield status, full_md or "(无文本内容)", str(zip_path), images
             return
-        status = f"✅ 已导出 Word（{source_label}）：1 页，耗时 {elapsed:.1f} 秒"
+        status = f"✅ 已导出 Word：1 页，耗时 {elapsed:.1f} 秒"
         yield status, full_md or "(无文本内容)", str(docx_path), images
         return
     elif export_mode in ("html", "json", "zip_md"):
