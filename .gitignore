@@ -18,6 +18,10 @@ __pycache__/
 .venv/
 venv/
 
+# ===== Docker 构建产物 =====
+# 离线 llama.cpp 源码包（由 tools/llama.cpp 打包生成，Docker 构建依赖，不纳入版本库）
+docker/llama.cpp-src.tar.gz
+
 # ===== 编辑器 =====
 .idea/
 .vscode/
