@@ -237,6 +237,46 @@ def _preprocess_latex(latex: str) -> str:
     return "".join(parts)
 
 
+def _mathml_fenced_postprocess(math_root: Any, math_namespace: str) -> None:
+    r"""把 <mo fence="true"> 定界符包装成 <mfenced>。
+
+    latex2mathml 对 \left(...\right) 生成的是带 fence="true" 的 <mo>，
+    docx-equation 不会把它们转成 OMML 的 <m:d> 定界符，导致 Word 里
+    尖括号、竖线等显示异常。改成 <mfenced> 后 docx-equation 会生成
+    正确的 <m:d> 节点。
+    """
+    from lxml import etree
+
+    for mrow in list(math_root.iter(f"{{{math_namespace}}}mrow")):
+        children = list(mrow)
+        if len(children) < 2:
+            continue
+        first = children[0]
+        last = children[-1]
+        if (
+            etree.QName(first).localname == "mo"
+            and first.get("fence") == "true"
+            and first.get("form") == "prefix"
+            and etree.QName(last).localname == "mo"
+            and last.get("fence") == "true"
+            and last.get("form") == "postfix"
+        ):
+            open_text = first.text or ""
+            close_text = last.text or ""
+            mfenced = etree.Element(f"{{{math_namespace}}}mfenced")
+            if open_text:
+                mfenced.set("open", open_text)
+            if close_text:
+                mfenced.set("close", close_text)
+            for child in children[1:-1]:
+                mfenced.append(child)
+            parent = mrow.getparent()
+            if parent is not None:
+                index = list(parent).index(mrow)
+                parent.remove(mrow)
+                parent.insert(index, mfenced)
+
+
 def _latex_to_omml(latex: str, *, display: bool) -> Any:
     from docx_equation import mathml_to_omml
     from latex2mathml.converter import convert
@@ -252,6 +292,9 @@ def _latex_to_omml(latex: str, *, display: bool) -> Any:
     )
     math_root = etree.fromstring(safe_mathml.encode("utf-8"))
     math_namespace = "http://www.w3.org/1998/Math/MathML"
+
+    _mathml_fenced_postprocess(math_root, math_namespace)
+
     has_aligned_environment = bool(
         re.search(
             r"\\begin\{(?:aligned|alignedat|align\*?|split|gathered)\}",
@@ -469,15 +512,11 @@ def _append_display_formula(document, raw: str, summary: ExportSummary) -> None:
     justification.set(f"{{{math_namespace}}}val", "center")
 
     body = document._element.body
-    section_properties = body.sectPr
     # OMML 规范：<m:oMathPara> 必须直接作为 <w:p> 的子元素，不能包在 <w:r> 里。
-    # 先创建段落再把 oMathPara 放入，最后挂到 body 末尾（或分节符之前）。
+    # 先创建段落再把 oMathPara 放入，按调用顺序追加到 body 末尾。
     paragraph = etree.Element(f"{{{word_namespace}}}p")
     paragraph.append(omml)
-    if section_properties is None:
-        body.append(paragraph)
-    else:
-        section_properties.addprevious(paragraph)
+    body.append(paragraph)
     summary.formulas_converted += 1
 
 
