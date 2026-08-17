@@ -52,12 +52,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# 拷贝项目代码（根目录 .dockerignore 已排除 tools/llama.cpp、outputs/、logs/、.git 等）
-# 源码即构建上下文根目录，需直接落到 /app 下（start_all.sh 等以 /app 为工作目录）
-COPY . /app
-
 # 内置 GGUF 量化模型（2.8G：fp16 主模型 + mmproj + q8_0/q5_k_m/q4_k_m）。
 # 已包含所有可切换精度，容器内 ensure_vl_model 检测到文件存在会跳过下载/转换，实现开箱即用。
+# 与源码无关，放在最前面以最大化层缓存命中。
 COPY tools/gguf/1.6 /app/tools/gguf/1.6
 
 # 内置产线子模型（版面检测 PP-DocLayoutV3 / 文档方向分类 PP-LCNet_x1_0_doc_ori / 矫正 UVDoc），
@@ -69,8 +66,12 @@ COPY tools/paddlex-models /root/.paddlex/official_models
 # GGUF 转换脚本 convert_hf_to_gguf.py 随「模型已内置」而移除，进一步减小体积。
 COPY --from=builder /workspace/llama.cpp/build-cuda/bin /app/tools/llama.cpp/build-cuda/bin
 
-# 安装 PaddlePaddle（cu129，官方轮子自带 CUDA/cuDNN） + PaddleOCR + 服务化插件
+# 先单独拷贝 requirements-web.txt 并安装全部依赖；源码最后再 COPY，
+# 这样修改源码不会触发 paddlepaddle / paddleocr 等大体积依赖重新安装。
 ARG PADDLE_VERSION=3.2.2
+COPY requirements-web.txt /app/requirements-web.txt
+
+# 安装 PaddlePaddle（cu129，官方轮子自带 CUDA/cuDNN） + PaddleOCR + 服务化插件
 RUN python -m pip install --upgrade pip \
     && python -m pip install "paddlepaddle-gpu==${PADDLE_VERSION}" \
         -i https://www.paddlepaddle.org.cn/packages/stable/cu129/ \
@@ -89,6 +90,9 @@ RUN python -m pip install -r requirements-web.txt
 RUN apt-get update && apt-get install -y --no-install-recommends \
         poppler-utils \
     && rm -rf /var/lib/apt/lists/*
+
+# 源码最后拷贝（只影响 COPY 层及其后的入口脚本层，改动后构建接近秒级）
+COPY . /app
 
 # 入口脚本
 COPY docker/docker-entrypoint.sh /app/docker-entrypoint.sh
