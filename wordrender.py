@@ -155,12 +155,94 @@ def _require_dependencies() -> None:
         ) from exc
 
 
+def _skip_balanced_group(latex: str, start: int) -> int:
+    """从 start 处（必须是 '{'）扫描到配对的 '}'，返回其后的下标。"""
+    depth = 0
+    index = start
+    while index < len(latex):
+        char = latex[index]
+        if char == "\\":
+            # 转义字符（如 \{ \}）不参与括号配对
+            index += 2
+            continue
+        if char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+            if depth == 0:
+                return index + 1
+        index += 1
+    return -1
+
+
+def _genfrac_replacement(
+    left_delim: str,
+    right_delim: str,
+    thickness: str,
+    style: str,
+    numerator: str,
+    denominator: str,
+) -> str:
+    """把 \\genfrac{ld}{rd}{th}{style}{num}{den} 重写为 latex2mathml 支持的等价形式。"""
+    if thickness not in ("", "0", "0pt"):
+        # 有分数横线：按样式映射为 dfrac / tfrac / frac
+        if style == "0":
+            fraction = rf"\dfrac{{{numerator}}}{{{denominator}}}"
+        elif style == "1":
+            fraction = rf"\tfrac{{{numerator}}}{{{denominator}}}"
+        else:
+            fraction = rf"\frac{{{numerator}}}{{{denominator}}}"
+    else:
+        # 无横线：\atop 直接堆叠（\binom 即空定界 + 0pt 的特例）
+        fraction = "{" + numerator + r" \atop " + denominator + "}"
+    if not (left_delim or right_delim):
+        return fraction
+    # \left< 不是合法定界，< / > 对应尖括号 \langle / \rangle
+    left = r"\langle" if left_delim == "<" else (left_delim or ".")
+    right = r"\rangle" if right_delim == ">" else (right_delim or ".")
+    return rf"\left{left} {fraction} \right{right}"
+
+
+def _preprocess_latex(latex: str) -> str:
+    """把 latex2mathml 不支持的 LaTeX 命令改写为等价写法（目前仅 \\genfrac）。"""
+    parts: list[str] = []
+    position = 0
+    index = 0
+    while index < len(latex):
+        if latex.startswith(r"\genfrac", index):
+            cursor = index + len(r"\genfrac")
+            arguments: list[str] = []
+            for _ in range(6):
+                while cursor < len(latex) and latex[cursor].isspace():
+                    cursor += 1
+                if cursor >= len(latex) or latex[cursor] != "{":
+                    arguments = []
+                    break
+                end = _skip_balanced_group(latex, cursor)
+                arguments.append(latex[cursor:end])
+                cursor = end
+            if len(arguments) == 6:
+                parts.append(latex[position:index])
+                # 分子/分母里可能再嵌套 \genfrac，递归改写后再替换
+                arguments[4] = _preprocess_latex(arguments[4])
+                arguments[5] = _preprocess_latex(arguments[5])
+                parts.append(
+                    _genfrac_replacement(*(argument[1:-1] for argument in arguments))
+                )
+                position = cursor
+                index = cursor
+                continue
+        index += 1
+    parts.append(latex[position:])
+    return "".join(parts)
+
+
 def _latex_to_omml(latex: str, *, display: bool) -> Any:
     from docx_equation import mathml_to_omml
     from latex2mathml.converter import convert
     from lxml import etree
 
-    mathml = convert(latex.strip())
+    mathml = convert(_preprocess_latex(latex.strip()))
     # latex2mathml 3.81.0 会把 aligned 的定位符输出成未转义的
     # `<mi>&</mi>`，先修成合法 XML，再转换为多行无边框矩阵。
     safe_mathml = re.sub(
