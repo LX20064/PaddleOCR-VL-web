@@ -9,6 +9,14 @@
 
 ### 修复
 
+- **修复含公式的 DOCX 在 Microsoft Word 中打不开的问题**
+  - 将 `<m:oMath>` / `<m:oMathPara>` 包裹到 `<w:r>` 中，符合 Word 段落内容模型
+    （之前直接挂在 `<w:p>` 下，Word 严格校验报错）。
+  - 清理 docx-equation 生成的 `<m:rPr>/<m:sty>` 与 `<m:ctrlPr>` 元素，
+    这些元素在 Word 严格模式下会导致文档损坏提示；清理后 LibreOffice 与
+    Microsoft Word 均可正常渲染。
+  - 给 `<m:t>` 首尾含空格的文本节点添加 `xml:space="preserve"`。
+
 - **wordrender 公式支持增强（\genfrac）**
   - 新增 `\genfrac` 预处理，将 latex2mathml 不支持的 `\genfrac{ld}{rd}{th}{style}{num}{den}`
     重写为等价写法：有分数横线时按样式映射为 `\frac` / `\dfrac` / `\tfrac`，

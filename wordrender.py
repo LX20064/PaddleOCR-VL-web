@@ -359,6 +359,23 @@ def _latex_to_omml(latex: str, *, display: bool) -> Any:
                 "Cambria Math",
             )
         fonts.set(f"{{{word_namespace}}}eastAsia", "微软雅黑")
+
+    # docx-equation 生成的 <m:rPr>/<m:sty> 与 <m:ctrlPr> 会让 Microsoft Word
+    # 严格校验报错；LibreOffice / Word 均不需要这些元素即可正确渲染。
+    # 同时给 <m:t> 加 xml:space="preserve"，避免首尾空格被吃掉。
+    XML_SPACE = "{http://www.w3.org/XML/1998/namespace}space"
+    for rpr in list(omml.xpath(".//m:rPr", namespaces={"m": omml_namespace})):
+        parent = rpr.getparent()
+        if parent is not None:
+            parent.remove(rpr)
+    for ctrl_pr in list(omml.xpath(".//m:ctrlPr", namespaces={"m": omml_namespace})):
+        parent = ctrl_pr.getparent()
+        if parent is not None:
+            parent.remove(ctrl_pr)
+    for t_el in omml.xpath(".//m:t", namespaces={"m": omml_namespace}):
+        text = t_el.text or ""
+        if text.startswith(" ") or text.endswith(" "):
+            t_el.set(XML_SPACE, "preserve")
     return omml
 
 
@@ -401,10 +418,20 @@ def _new_document():
     return document
 
 
+def _wrap_omml_in_run(omml) -> Any:
+    """把 <m:oMath> / <m:oMathPara> 包裹到 <w:r> 中，符合 Word 的段落内容模型。"""
+    from lxml import etree
+
+    W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    run = etree.Element(f"{{{W_NS}}}r")
+    run.append(omml)
+    return run
+
+
 def _append_formula(paragraph, raw: str, summary: ExportSummary) -> None:
     latex, _display = _formula_details(raw)
     try:
-        paragraph._p.append(_latex_to_omml(latex, display=False))
+        paragraph._p.append(_wrap_omml_in_run(_latex_to_omml(latex, display=False)))
     except Exception:
         paragraph.add_run(_clean_xml_text(raw))
         summary.formulas_fallback += 1
@@ -439,10 +466,11 @@ def _append_display_formula(document, raw: str, summary: ExportSummary) -> None:
 
     body = document._element.body
     section_properties = body.sectPr
+    run = _wrap_omml_in_run(omml)
     if section_properties is None:
-        body.append(omml)
+        body.append(run)
     else:
-        section_properties.addprevious(omml)
+        section_properties.addprevious(run)
     summary.formulas_converted += 1
 
 
