@@ -442,6 +442,10 @@ def _append_formula(paragraph, raw: str, summary: ExportSummary) -> None:
 def _append_display_formula(document, raw: str, summary: ExportSummary) -> None:
     from lxml import etree
 
+    word_namespace = (
+        "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+    )
+
     latex, _display = _formula_details(raw)
     try:
         omml = _latex_to_omml(latex, display=True)
@@ -466,11 +470,14 @@ def _append_display_formula(document, raw: str, summary: ExportSummary) -> None:
 
     body = document._element.body
     section_properties = body.sectPr
-    run = _wrap_omml_in_run(omml)
+    # OMML 规范：<m:oMathPara> 必须直接作为 <w:p> 的子元素，不能包在 <w:r> 里。
+    # 先创建段落再把 oMathPara 放入，最后挂到 body 末尾（或分节符之前）。
+    paragraph = etree.Element(f"{{{word_namespace}}}p")
+    paragraph.append(omml)
     if section_properties is None:
-        body.append(run)
+        body.append(paragraph)
     else:
-        section_properties.addprevious(run)
+        section_properties.addprevious(paragraph)
     summary.formulas_converted += 1
 
 
