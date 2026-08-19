@@ -1,0 +1,27 @@
+# ===== 依赖与构建产物 =====
+node_modules/
+dist/
+release/
+release2/
+release5/
+release_new/
+release_fixed/
+.cache/
+.vite/
+
+# ===== 离线整合包（8.6GB，体积巨大不入库） =====
+offline/
+
+# ===== 调试与临时文件 =====
+build_log.txt
+window_shot*.png
+test_*.pdf
+test_*.jpg
+test_*.png
+# ===== build artifacts & logs (do not commit) =====
+release_v*/
+eb-cache/
+iso-staging*/
+build_fixed*.log
+build_redist.log
+*.blockmap

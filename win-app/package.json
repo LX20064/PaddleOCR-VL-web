@@ -1,0 +1,105 @@
+{
+  "name": "paddleocr-vl-win",
+  "version": "0.1.0",
+  "description": "PaddleOCR-VL Windows 扫描识别桌面应用（Electron + Vue3 + Element Plus）",
+  "main": "electron/main.js",
+  "author": "PaddleOCR-VL",
+  "license": "MIT",
+  "private": true,
+  "scripts": {
+    "dev": "concurrently -k \"npm:dev:vite\" \"npm:dev:electron\"",
+    "dev:vite": "vite",
+    "dev:electron": "wait-on tcp:127.0.0.1:5173 && cross-env VITE_DEV_SERVER_URL=http://127.0.0.1:5173 electron .",
+    "build": "vite build",
+    "start": "npm run build && electron .",
+    "dist": "npm run build && electron-builder --win",
+    "dist:dir": "npm run build && electron-builder --win --dir"
+  },
+  "dependencies": {
+    "@element-plus/icons-vue": "^2.3.1",
+    "dompurify": "^3.4.13",
+    "element-plus": "^2.9.1",
+    "katex": "^0.18.4",
+    "koffi": "^3.1.5",
+    "marked": "^15.0.4",
+    "vue": "^3.5.13"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.2.1",
+    "concurrently": "^9.1.0",
+    "cross-env": "^7.0.3",
+    "electron": "^33.3.1",
+    "electron-builder": "^25.1.8",
+    "vite": "^5.4.11",
+    "wait-on": "^8.0.1"
+  },
+  "build": {
+    "appId": "cn.paddleocr.vlscan",
+    "productName": "PaddleOCR-VL 扫描",
+    "electronDist": "node_modules/electron/dist",
+    "asar": true,
+    "asarUnpack": [
+      "node_modules/koffi/**/*"
+    ],
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "dist/**/*",
+      "electron/**/*"
+    ],
+    "extraResources": [
+      {
+        "from": "offline",
+        "to": "offline"
+      },
+      {
+        "from": "electron/python",
+        "to": "python"
+      },
+      {
+        "from": "build/icon.ico",
+        "to": "icon.ico"
+      },
+      {
+        "from": "../wordrender.py",
+        "to": "python/wordrender.py"
+      },
+      {
+        "from": "../PaddleOCR-VL.yaml",
+        "to": "backend/PaddleOCR-VL.yaml"
+      }
+    ],
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "artifactName": "${productName}-${version}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true,
+      "warningsAsErrors": false,
+      "createDesktopShortcut": true,
+      "shortcutName": "PaddleOCR-VL 扫描",
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "customNsisBinary": {
+        "url": "https://github.com/SoundSafari/NSISBI-ElectronBuilder/releases/download/1.0.0/nsisbi-electronbuilder-3.10.3.7z",
+        "checksum": "WRmZUsACjIc2s7bvsFGFRofK31hfS7riPlcfI1V9uFB2Q8s7tidgI/9U16+X0I9X2ZhNxi8N7Z3gKvm6ojvLvg=="
+      }
+    }
+  }
+}

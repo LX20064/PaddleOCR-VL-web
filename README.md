@@ -71,8 +71,8 @@ source ~/.venv_paddleocr/bin/activate
 ## 第 2 步：安装 PaddlePaddle + PaddleOCR-VL
 
 ```bash
-# GPU 版 PaddlePaddle（CUDA 12.6 构建，驱动 580 兼容）
-python -m pip install paddlepaddle-gpu==3.2.1 -i https://www.paddlepaddle.org.cn/packages/stable/cu126/
+# GPU 版 PaddlePaddle（CUDA 12.9 构建，原生支持 Blackwell RTX50；驱动 580 兼容）
+python -m pip install paddlepaddle-gpu==3.3.0 -i https://www.paddlepaddle.org.cn/packages/stable/cu129/
 
 # PaddleOCR-VL 基础包
 python -m pip install -U "paddleocr[doc-parser]"

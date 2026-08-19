@@ -124,6 +124,7 @@ _DEPENDENCY_MODULES = (
     "latex2mathml",
     "lxml",
     "markdown_it",
+    "PIL",
 )
 
 
@@ -148,13 +149,15 @@ def _require_dependencies() -> None:
         import latex2mathml  # noqa: F401
         import lxml  # noqa: F401
         import markdown_it  # noqa: F401
+        import PIL  # noqa: F401
     except (ImportError, OSError) as exc:
         raise WordExportDependencyError(
             "Word 导出依赖不可用，请在当前 env 中安装 "
-            "python-docx、docx-equation、latex2mathml、lxml 和 markdown-it-py。"
+            "python-docx、docx-equation、latex2mathml、lxml、markdown-it-py 和 Pillow。"
         ) from exc
 
 
+<<<<<<< Updated upstream
 def _skip_balanced_group(latex: str, start: int) -> int:
     """从 start 处（必须是 '{'）扫描到配对的 '}'，返回其后的下标。"""
     depth = 0
@@ -275,6 +278,126 @@ def _mathml_fenced_postprocess(math_root: Any, math_namespace: str) -> None:
                 index = list(parent).index(mrow)
                 parent.remove(mrow)
                 parent.insert(index, mfenced)
+=======
+def _brace_group(source: str, start: int) -> tuple[str | None, int]:
+    """从 source[start] 解析一个花括号组（支持嵌套）。
+
+    返回 (组内容, 结束后的下标)；不是 '{' 或未闭合时返回 (None, 原下标)。
+    """
+
+    if start >= len(source) or source[start] != "{":
+        return None, start
+    depth = 0
+    for index in range(start, len(source)):
+        character = source[index]
+        if character == "{":
+            depth += 1
+        elif character == "}":
+            depth -= 1
+            if depth == 0:
+                return source[start + 1 : index], index + 1
+    return None, start
+
+
+def _skip_math_spaces(source: str, start: int) -> int:
+    """跳过数学源码中的空白（``\\genfrac`` 各参数间允许空格）。"""
+
+    while start < len(source) and source[start] in " \t\r\n":
+        start += 1
+    return start
+
+
+def _genfrac_to_tex(
+    left_delim: str,
+    right_delim: str,
+    thickness: str,
+    mathstyle: str,
+    numerator: str,
+    denominator: str,
+) -> str:
+    """把 \\genfrac{ld}{rd}{th}{style}{num}{den} 重写为 latex2mathml
+    支持的等价形式：
+
+    - thickness 为 0 / 0pt / 空（无横线）→ ``{num \\atop den}`` 堆叠
+    - 否则按 style 映射为 \\dfrac / \\frac / \\tfrac / \\frac
+    - 定界符非空时补 ``\\left ... \\right``（"." 视为空定界符）
+    - 分子分母中的嵌套 \\genfrac 会递归展开
+    """
+
+    numerator = _preprocess_genfrac(numerator)
+    denominator = _preprocess_genfrac(denominator)
+
+    no_bar = thickness.strip().lower() in {"", "0", "0pt"}
+    style_commands = {
+        "0": r"\dfrac",   # displaystyle
+        "1": r"\frac",    # textstyle
+        "2": r"\tfrac",   # scriptstyle
+        "3": r"\frac",    # scriptscriptstyle（无直接等价，退化为 \frac）
+    }
+    if no_bar:
+        core = "{" + numerator + r" \atop " + denominator + "}"
+    else:
+        core = (
+            style_commands.get(mathstyle.strip(), r"\frac")
+            + "{" + numerator + "}{" + denominator + "}"
+        )
+
+    left = left_delim.strip()
+    right = right_delim.strip()
+    left = "" if left in {"", "."} else left
+    right = "" if right in {"", "."} else right
+    if not left and not right:
+        return core
+    return (
+        (r"\left" + left if left else r"\left.")
+        + core
+        + (r"\right" + right if right else r"\right.")
+    )
+
+
+def _preprocess_genfrac(latex: str) -> str:
+    """把 latex2mathml 不支持的 ``\\genfrac{ld}{rd}{th}{style}{num}{den}``
+    重写为等价的 \\frac / \\dfrac / \\tfrac 与 \\atop 堆叠，
+    支持嵌套与多种定界符。"""
+
+    parts: list[str] = []
+    index = 0
+    length = len(latex)
+    while index < length:
+        if (
+            latex[index] == "\\"
+            and latex.startswith("genfrac", index + 1)
+            and index + 8 < length
+            and not latex[index + 8].isalpha()
+        ):
+            cursor = _skip_math_spaces(latex, index + 8)
+            groups: list[str] = []
+            valid = True
+            for _ in range(6):
+                content, cursor = _brace_group(latex, cursor)
+                if content is None:
+                    valid = False
+                    break
+                groups.append(content)
+                # \genfrac 各参数之间允许出现空格，逐个跳过
+                cursor = _skip_math_spaces(latex, cursor)
+            if valid:
+                parts.append(_genfrac_to_tex(*groups))
+                index = cursor
+                continue
+        parts.append(latex[index])
+        index += 1
+    return "".join(parts)
+
+
+def _preprocess_latex(latex: str) -> str:
+    """LaTeX 预处理：把 latex2mathml 不支持的语法改写为等价形式。
+
+    当前实现 \\genfrac 重写；后续新增命令支持时在此链式追加即可。
+    """
+
+    return _preprocess_genfrac(latex)
+>>>>>>> Stashed changes
 
 
 def _latex_to_omml(latex: str, *, display: bool) -> Any:
@@ -511,12 +634,18 @@ def _append_display_formula(document, raw: str, summary: ExportSummary) -> None:
         )
     justification.set(f"{{{math_namespace}}}val", "center")
 
+<<<<<<< Updated upstream
     body = document._element.body
     # OMML 规范：<m:oMathPara> 必须直接作为 <w:p> 的子元素，不能包在 <w:r> 里。
     # 先创建段落再把 oMathPara 放入，按调用顺序追加到 body 末尾。
     paragraph = etree.Element(f"{{{word_namespace}}}p")
     paragraph.append(omml)
     body.append(paragraph)
+=======
+    # Word 要求 <m:oMathPara> 必须位于 <w:p> 段落内，不能直接挂在 body 下。
+    paragraph = document.add_paragraph()
+    paragraph._p.append(omml)
+>>>>>>> Stashed changes
     summary.formulas_converted += 1
 
 
@@ -548,13 +677,11 @@ def _protect_markdown_code(markdown: str) -> tuple[str, dict[str, str]]:
     parts.append(markdown[position:])
     block_protected = "".join(parts)
 
-    # CommonMark 的行内代码不能跨越空行。若不加这个限制，正文里两个不成对
-    # 的孤立反引号会把中间整段内容都当成代码保护起来，其中的公式就再也不会
-    # 被转换成 OMML。
+    # CommonMark 的行内代码可以跨软换行，但 OCR 文本里不成对的孤立反引号常见：
+    # 若允许跨行匹配，两个孤立反引号会把中间整段（含公式）都当成代码保护起来，
+    # 导致其中的公式再也不会被转换成 OMML。因此这里收紧为仅同一行内配对。
     inline_pattern = re.compile(
-        r"(?<!\\)(?P<ticks>`+)"
-        r"(?P<body>(?:[^\r\n]|\r?\n(?![ \t]*\r?\n))*?)"
-        r"(?P=ticks)"
+        r"(?<!\\)(?P<ticks>`+)(?P<body>[^\r\n]*?)(?P=ticks)"
     )
 
     def replace_inline(match: re.Match[str]) -> str:
@@ -1008,7 +1135,8 @@ class _DocxRenderer:
         try:
             with Image.open(image_path) as image:
                 width_pixels, _height_pixels = image.size
-                dpi_value = image.info.get("dpi", (96, 96))
+                # 部分 TIFF 无分辨率单位时 info 里无 dpi 键；带单位时返回 (dpi_x, dpi_y)
+                dpi_value = image.info.get("dpi") or (96, 96)
             if isinstance(dpi_value, (int, float)):
                 dpi_x = float(dpi_value)
             else:

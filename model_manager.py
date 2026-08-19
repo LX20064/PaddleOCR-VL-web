@@ -87,13 +87,24 @@ def _check_toolchain():
         raise RuntimeError(f"缺少 llama-server：{LLAMA_SERVER_BIN}")
 
 
+# 转换依赖：（导入名, pip 包名）。protobuf 的导入名是 google.protobuf，
+# 而 pip 包名为 protobuf，两者必须分开，否则 __import__("protobuf") 永远失败。
+CONVERT_DEPS = [
+    ("torch", "torch"),
+    ("transformers", "transformers"),
+    ("google.protobuf", "protobuf"),
+    ("safetensors", "safetensors"),
+    ("sentencepiece", "sentencepiece"),
+]
+
+
 def _missing_deps():
     missing = []
-    for name in ("torch", "transformers", "protobuf", "safetensors", "sentencepiece"):
+    for import_name, _ in CONVERT_DEPS:
         try:
-            __import__(name)
+            __import__(import_name)
         except Exception:
-            missing.append(name)
+            missing.append(import_name)
     return missing
 
 
@@ -112,7 +123,8 @@ def _install_deps():
             timeout=DOWNLOAD_TIMEOUT,
         )
 
-    rest = [m for m in missing if m != "torch"]
+    rest = [pkg for import_name, pkg in CONVERT_DEPS
+            if import_name in missing and import_name != "torch"]
     if rest:
         _run_checked(
             pip + rest + ["-i", "https://pypi.tuna.tsinghua.edu.cn/simple/"],
