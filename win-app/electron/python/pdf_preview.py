@@ -37,6 +37,16 @@ def main():
         import tempfile
         preview_dir = Path(tempfile.gettempdir()) / "paddleocr_preview" / f"{pdf.stem}_{uuid.uuid4().hex[:6]}"
 
+    # 可选 --max-pages N：只渲染前 N 页（大图预览仅需首页时避免整本渲染）
+    max_pages = None
+    rest = sys.argv[3:]
+    if "--max-pages" in rest:
+        i = rest.index("--max-pages")
+        try:
+            max_pages = max(1, int(rest[i + 1]))
+        except (IndexError, ValueError):
+            max_pages = None
+
     pages = []
     doc = None
     try:
@@ -46,14 +56,16 @@ def main():
         if total == 0:
             emit({"t": "result", "ok": False, "error": "PDF 无页面。"})
             sys.exit(1)
-        for i, page in enumerate(doc):
+        count = min(max_pages, total) if max_pages else total
+        for n in range(count):
+            page = doc[n]
             pix = page.get_pixmap(dpi=120)
-            out = preview_dir / f"page-{i + 1:03d}.png"
+            out = preview_dir / f"page-{n + 1:03d}.png"
             pix.save(str(out))
             pages.append(str(out))
-            if i % 5 == 0:
-                emit({"t": "progress", "frac": (i + 1) / max(total, 1),
-                      "desc": f"渲染 PDF 预览 {i + 1}/{total} 页"})
+            if n % 5 == 0:
+                emit({"t": "progress", "frac": (n + 1) / max(count, 1),
+                      "desc": f"渲染 PDF 预览 {n + 1}/{count} 页"})
     except SystemExit:
         raise
     except Exception as e:

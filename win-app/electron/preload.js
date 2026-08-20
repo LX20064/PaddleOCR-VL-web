@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('api', {
   getSettings: () => ipcRenderer.invoke('settings:get'),
   saveSettings: (partial) => ipcRenderer.invoke('settings:save', partial),
   getDefaultDirs: () => ipcRenderer.invoke('sys:default-dirs'),
+  pathExists: (p) => ipcRenderer.invoke('sys:path-exists', p),
 
   // ---- 后端服务管理 ----
   getBackendStatus: () => ipcRenderer.invoke('backend:status'),
@@ -26,7 +27,7 @@ contextBridge.exposeInMainWorld('api', {
   // ---- 解析 / 导出 / 预览（Python sidecar）----
   parseFile: (req) => ipcRenderer.invoke('scan:parse', req),
   exportRender: (req) => ipcRenderer.invoke('export:render', req),
-  renderPdfPreview: (pdfPath) => ipcRenderer.invoke('scan:pdf-preview', pdfPath),
+  renderPdfPreview: (pdfPath, maxPages) => ipcRenderer.invoke('scan:pdf-preview', pdfPath, maxPages),
 
   // ---- WIA 扫描仪（UWP 扫描功能）----
   scanDevices: () => ipcRenderer.invoke('scan:devices'),
@@ -47,6 +48,7 @@ contextBridge.exposeInMainWorld('api', {
   imageDataUri: (p) => ipcRenderer.invoke('img:data', p),
   getPathForFile: (f) => webUtils.getPathForFile(f),
   revealPath: (p) => ipcRenderer.invoke('sys:reveal', p),
+  openDir: (dir) => ipcRenderer.invoke('sys:open-dir', dir),
   openExternal: (url) => ipcRenderer.invoke('sys:open-external', url),
   windowMin: () => ipcRenderer.send('win:min'),
   windowMax: () => ipcRenderer.send('win:max'),

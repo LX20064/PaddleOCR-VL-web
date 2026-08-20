@@ -20,14 +20,37 @@
         <div class="card acq-console">
           <ScanConsole @scan-done="onScanDone" />
         </div>
-        <div class="card acq-tips">
-          <div class="tips-title">扫描说明</div>
-          <ul class="tips-list">
-            <li>扫描完成后，页面自动加入下方「已获取页面」</li>
-            <li>ADF（送纸器）支持多页连续扫描，开启「自动」扫至纸空</li>
-            <li>开启「增强」自动去白边 / 去底色</li>
-            <li>扫描完成后点击底部「识别全部」直接进行 OCR</li>
-          </ul>
+        <!-- 右侧：点击已获取页面查看高清大图 -->
+        <div class="card acq-view">
+          <div class="av-head">
+            <span class="av-title">{{ viewItem ? viewItem.name : '页面查看' }}</span>
+            <span style="flex:1"></span>
+            <template v-if="viewItem">
+              <el-button size="small" text @click="removePreview">从列表移除</el-button>
+              <el-button type="primary" size="small" @click="sendPreviewToOcr">
+                <el-icon style="margin-right:3px"><VideoPlay /></el-icon>识别此页
+              </el-button>
+            </template>
+          </div>
+          <div class="av-body">
+            <template v-if="viewItem">
+              <img v-if="viewUri" :src="viewUri" class="av-img" />
+              <div v-else class="av-file">
+                <el-icon :size="42"><Document /></el-icon>
+                <div style="word-break:break-all;font-size:12px;color:var(--muted)">{{ viewItem.path }}</div>
+              </div>
+            </template>
+            <div v-else class="av-empty">
+              <el-icon :size="34" style="margin-bottom:8px;color:var(--muted)"><Picture /></el-icon>
+              <div>点击下方「已获取页面」中的条目查看高清大图</div>
+              <ul class="av-tips">
+                <li>扫描完成后，页面自动加入下方「已获取页面」</li>
+                <li>ADF（送纸器）支持多页连续扫描，开启「自动」扫至纸空</li>
+                <li>开启「增强」自动去白边 / 去底色</li>
+                <li>点击「识别此页」或底部「识别全部」直接进行 OCR</li>
+              </ul>
+            </div>
+          </div>
         </div>
       </div>
 
@@ -62,21 +85,6 @@
       </div>
       <div v-else class="tray-empty">扫描或拍照的页面会出现在这里，可批量识别</div>
     </div>
-
-    <!-- 页面预览对话框 -->
-    <el-dialog v-model="previewOpen" :title="previewItem?.name" width="min(760px, 86vw)">
-      <div class="pv-body">
-        <img v-if="previewUri" :src="previewUri" class="pv-img" />
-        <div v-else class="pv-file">
-          <el-icon :size="42"><Document /></el-icon>
-          <div style="word-break:break-all;font-size:12px;color:var(--muted)">{{ previewItem?.path }}</div>
-        </div>
-      </div>
-      <template #footer>
-        <el-button @click="removePreview">从列表移除</el-button>
-        <el-button type="primary" @click="sendPreviewToOcr">识别此页</el-button>
-      </template>
-    </el-dialog>
   </div>
 </template>
 
@@ -84,7 +92,7 @@
 import { ref, computed, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { store, log } from '../store'
-import { Printer, Camera, Document, VideoPlay } from '@element-plus/icons-vue'
+import { Printer, Camera, Document, VideoPlay, Picture } from '@element-plus/icons-vue'
 import ScanConsole from './ScanConsole.vue'
 import CameraCapture from './CameraCapture.vue'
 
@@ -131,31 +139,44 @@ function sendAllToOcr() {
   emit('navigate', 'doc')
 }
 
-// ---- 预览 ----
-const previewOpen = ref(false)
-const previewIdx = ref(-1)
-const previewUri = ref('')
-const previewItem = computed(() => tray[previewIdx.value] || null)
+// ---- 右侧高清大图查看（点击托盘条目选中） ----
+const viewIdx = ref(-1)
+const viewUri = ref('')
+const viewItem = computed(() => tray[viewIdx.value] || null)
 
 async function openPreview(i) {
-  previewIdx.value = i
+  viewIdx.value = i
   const it = tray[i]
-  previewUri.value = it?.uri || ''
-  if (it && !previewUri.value && isImage(it.path)) {
-    previewUri.value = await window.api.imageDataUri(it.path) || ''
+  // 优先用托盘缓存的原图 data URI；图片/PDF 未缓存时按需读取（TIFF 由主进程自动转 PNG）
+  viewUri.value = it?.uri || ''
+  if (it && !viewUri.value) {
+    if (isImage(it.path)) {
+      viewUri.value = await window.api.imageDataUri(it.path) || ''
+    } else if (/\.pdf$/i.test(it.path)) {
+      // PDF：只渲染第一页作为大图预览，渲染结果回写托盘缓存避免重复渲染
+      try {
+        const r = await window.api.renderPdfPreview(it.path, 1)
+        const first = r?.ok && r.pages?.length ? r.pages[0] : null
+        if (first) {
+          viewUri.value = await window.api.imageDataUri(first) || ''
+          it.uri = viewUri.value
+        }
+      } catch (_) { /* 渲染失败保持文件卡片 */ }
+    }
   }
-  previewOpen.value = true
 }
 function removePreview() {
-  if (previewIdx.value >= 0) tray.splice(previewIdx.value, 1)
-  previewOpen.value = false
+  if (viewIdx.value >= 0) tray.splice(viewIdx.value, 1)
+  viewIdx.value = -1
+  viewUri.value = ''
 }
 function sendPreviewToOcr() {
-  const it = previewItem.value
+  const it = viewItem.value
   if (!it) return
   store.ocrInbox.push(it.path)
-  tray.splice(previewIdx.value, 1)
-  previewOpen.value = false
+  tray.splice(viewIdx.value, 1)
+  viewIdx.value = -1
+  viewUri.value = ''
   emit('navigate', 'doc')
 }
 </script>
@@ -176,9 +197,19 @@ function sendPreviewToOcr() {
 .acq-body { flex: 1; min-height: 0; }
 .acq-pane { display: flex; gap: 10px; height: 100%; min-height: 0; }
 .acq-console { flex: 0 0 360px; padding: 12px; overflow-y: auto; }
-.acq-tips { flex: 1; padding: 18px 22px; overflow-y: auto; }
-.tips-title { font-size: 14px; font-weight: 600; margin-bottom: 10px; }
-.tips-list { margin: 0; padding-left: 18px; color: var(--muted); font-size: 13px; line-height: 2.1; }
+
+/* 右侧：高清大图查看区 */
+.acq-view { flex: 1; padding: 12px; display: flex; flex-direction: column; min-width: 0; overflow: hidden; }
+.av-head { display: flex; align-items: center; gap: 8px; flex: none; padding-bottom: 8px; }
+.av-title { font-size: 14px; font-weight: 600; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.av-body {
+  flex: 1; min-height: 0; display: flex; align-items: center; justify-content: center;
+  background: rgba(0,0,0,.03); border: 1px dashed var(--border); border-radius: 8px; overflow: hidden;
+}
+.av-img { max-width: 100%; max-height: 100%; object-fit: contain; }
+.av-file { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--muted); padding: 16px; }
+.av-empty { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 4px; color: var(--muted); font-size: 13px; text-align: center; padding: 20px; }
+.av-tips { margin: 12px 0 0; padding-left: 18px; text-align: left; font-size: 12px; line-height: 2; }
 
 /* 托盘 */
 .tray { flex: none; }
@@ -206,9 +237,4 @@ function sendPreviewToOcr() {
   margin: 0 12px 10px; padding: 16px; text-align: center;
   color: var(--muted); font-size: 12px; border: 2px dashed var(--border); border-radius: 8px;
 }
-
-/* 预览对话框 */
-.pv-body { display: flex; align-items: center; justify-content: center; min-height: 200px; }
-.pv-img { max-width: 100%; max-height: 60vh; border-radius: 8px; }
-.pv-file { display: flex; flex-direction: column; align-items: center; gap: 10px; color: var(--muted); }
 </style>

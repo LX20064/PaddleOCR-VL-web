@@ -74,22 +74,40 @@ class ServiceManager {
     return path.join(this.deps.getBackendDir(), 'llama.cpp', 'llama-quantize.exe')
   }
 
+  // 运行时写入目录统一放用户数据目录（%APPDATA%\paddleocr-vl-win）：
+  // 安装到 Program Files 后 resources 目录只读，向 resources\offline 写日志/量化产物会抛 EPERM。
+  runtimeLogDir() {
+    return path.join(this.deps.getUserData(), 'logs')
+  }
+  // 量化产物（llama-quantize 生成）写入用户数据目录；内置只读模型仍从 resources 读取
+  runtimeModelsDir() {
+    return path.join(this.deps.getUserData(), 'models', 'gguf')
+  }
+  bundledModelsDir() {
+    return path.join(this.deps.getBackendDir(), 'models', 'gguf')
+  }
+
   findModels() {
     // 返回 [{ precision, gguf, mmproj, ready, quantizable }]
     // 基座只保留 FP16（PaddleOCR-VL-1.6-fp16.gguf + mmproj）；q4_k_m / q5_k_m / q8_0
     // 不随安装包分发，首次选用时由 llama-quantize 从 FP16 基座自动量化（quantizable=true）。
-    const base = path.join(this.deps.getBackendDir(), 'models', 'gguf')
-    const mmproj = path.join(base, 'PaddleOCR-VL-1.6-mmproj.gguf')
-    const fp16 = path.join(base, 'PaddleOCR-VL-1.6-fp16.gguf')
+    // 内置模型位于 resources（只读）；量化产物位于用户数据目录（可写，Program Files 安装不报 EPERM）。
+    const bundled = this.bundledModelsDir()
+    const runtime = this.runtimeModelsDir()
+    const mmproj = path.join(bundled, 'PaddleOCR-VL-1.6-mmproj.gguf')
+    const fp16 = path.join(bundled, 'PaddleOCR-VL-1.6-fp16.gguf')
     const hasBase = fs.existsSync(fp16) && fs.existsSync(mmproj)
     const out = []
     for (const p of ['fp16', 'q4_k_m', 'q5_k_m', 'q8_0']) {
-      const gguf = path.join(base, `PaddleOCR-VL-1.6-${p}.gguf`)
+      // 同精度产物优先取运行目录（用户量化过的），其次取内置目录
+      const ggufRun = path.join(runtime, `PaddleOCR-VL-1.6-${p}.gguf`)
+      const ggufBundled = path.join(bundled, `PaddleOCR-VL-1.6-${p}.gguf`)
+      const gguf = fs.existsSync(ggufRun) ? ggufRun : (fs.existsSync(ggufBundled) ? ggufBundled : null)
       const mmOk = fs.existsSync(mmproj)
       if (p === 'fp16') {
         if (hasBase) out.push({ precision: p, ready: true, quantizable: false, gguf, mmproj })
         else if (fs.existsSync(fp16) || mmOk) out.push({ precision: p, ready: false, quantizable: false, gguf: fs.existsSync(fp16) ? fp16 : null, mmproj: mmOk ? mmproj : null })
-      } else if (fs.existsSync(gguf) && mmOk) {
+      } else if (gguf && mmOk) {
         out.push({ precision: p, ready: true, quantizable: hasBase, gguf, mmproj })
       } else if (hasBase) {
         // FP16 基座已就绪 → 该精度可按需自动量化
@@ -178,7 +196,7 @@ class ServiceManager {
       // 注意：不再传 --log-disable —— 保留 llama 日志便于排查 GPU 启动失败等现场
     ]
     if (s.noCudaGraph) llamaArgs.push('--no-cuda-graph')
-    const logsDir = path.join(this.deps.getBackendDir(), 'logs')
+    const logsDir = this.runtimeLogDir()
     const llamaLogPath = path.join(logsDir, 'llama.log')
     this.rotateLogIfNeeded(llamaLogPath)
     const llamaLog = fs.openSync(llamaLogPath, 'a')
@@ -206,7 +224,7 @@ class ServiceManager {
   spawnApi(useGpuPaddle, yaml, bundled, backend) {
     const s = this.deps.getSettings()
     const py = this.deps.getVenvPython()
-    const logsDir = path.join(this.deps.getBackendDir(), 'logs')
+    const logsDir = this.runtimeLogDir()
     const apiLogPath = path.join(logsDir, 'api.log')
     this.rotateLogIfNeeded(apiLogPath)
     const apiLog = fs.openSync(apiLogPath, 'a')
@@ -228,7 +246,7 @@ class ServiceManager {
   // ---------- api 日志监控（GPU parallel_for failed → 自动切 CPU 重启） ----------
   startApiWatch() {
     this.stopApiWatch()
-    const logFile = path.join(this.deps.getBackendDir(), 'logs', 'api.log')
+    const logFile = path.join(this.runtimeLogDir(), 'api.log')
     // 记录当前文件大小作为起点，只增量读取新追加的内容
     try { this.apiWatchPos = fs.statSync(logFile).size } catch (_) { this.apiWatchPos = 0 }
     this.apiWatch = setInterval(() => {
@@ -305,7 +323,7 @@ class ServiceManager {
     const s = this.deps.getSettings()
     const bundled = this.deps.isBundled ? this.deps.isBundled() : false
     const backend = this.deps.getBackendDir()
-    const logsDir = path.join(backend, 'logs')
+    const logsDir = this.runtimeLogDir()
     fs.mkdirSync(logsDir, { recursive: true })
 
     if (!fs.existsSync(llamaExe)) {
@@ -451,15 +469,17 @@ class ServiceManager {
   }
 
   // 按需量化：用 llama-quantize 从 FP16 基座生成指定精度 GGUF（一次性，之后直接复用）。
-  // 量化结果写入 backend/logs/quantize.log，期间 status().quantizing 置位供 UI 提示。
+  // 量化日志写入用户数据目录 logs/quantize.log，期间 status().quantizing 置位供 UI 提示。
   // 同一精度并发触发时复用同一量化 promise，避免两个进程同时写同一个 out 文件。
   async ensureQuantized(precision) {
     const qmap = { q4_k_m: 'Q4_K_M', q5_k_m: 'Q5_K_M', q8_0: 'Q8_0' }
     const type = qmap[precision]
     if (!type) return false
-    const base = path.join(this.deps.getBackendDir(), 'models', 'gguf')
+    // 输入用内置只读 FP16 基座，输出写入用户数据目录（Program Files 安装下 resources 只读）
+    const base = this.bundledModelsDir()
+    const outDir = this.runtimeModelsDir()
     const fp16 = path.join(base, 'PaddleOCR-VL-1.6-fp16.gguf')
-    const out = path.join(base, `PaddleOCR-VL-1.6-${precision}.gguf`)
+    const out = path.join(outDir, `PaddleOCR-VL-1.6-${precision}.gguf`)
     if (fs.existsSync(out)) return true
     if (!fs.existsSync(fp16)) return false
     const quantize = this.findQuantize()
@@ -470,8 +490,9 @@ class ServiceManager {
     }
     this.quantizing = precision
     this.emitStatus()
-    const logsDir = path.join(this.deps.getBackendDir(), 'logs')
+    const logsDir = this.runtimeLogDir()
     fs.mkdirSync(logsDir, { recursive: true })
+    fs.mkdirSync(outDir, { recursive: true })
     const quantizeLogPath = path.join(logsDir, 'quantize.log')
     this.rotateLogIfNeeded(quantizeLogPath)
     const logFile = fs.openSync(quantizeLogPath, 'a')
@@ -588,7 +609,7 @@ class ServiceManager {
   readLog(kind) {
     // 仅允许读取已知服务日志，防止 kind 传 ../ 等路径穿越读取任意文件
     if (!['llama', 'api', 'quantize'].includes(kind)) return ''
-    const f = path.join(this.deps.getBackendDir(), 'logs', `${kind}.log`)
+    const f = path.join(this.runtimeLogDir(), `${kind}.log`)
     try {
       if (!fs.existsSync(f)) return ''
       const size = fs.statSync(f).size

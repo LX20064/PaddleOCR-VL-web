@@ -160,6 +160,13 @@
               </template>
             </el-input>
           </el-form-item>
+          <el-form-item label="PDF 输出保存位置">
+            <el-input v-model="pdfOutDir" placeholder="文档/PDF输出（图片转 PDF 的默认输出目录）">
+              <template #append>
+                <el-button @click="pickPdfOutDir">选择</el-button>
+              </template>
+            </el-input>
+          </el-form-item>
           <el-form-item label="后端 API 地址">
             <el-input v-model="apiUrl" placeholder="http://127.0.0.1:8080/layout-parsing" />
           </el-form-item>
@@ -217,10 +224,11 @@ const rememberModule = ref(false)
 const photoDir = ref('')
 const scanDir = ref('')
 const ocrDir = ref('')
+const pdfOutDir = ref('')
 const logTab = ref('api')
 const logs = reactive({ api: '', llama: '' })
 // 解析后的系统默认目录（getDefaultDirs 返回值），用于保存时判断是否要把默认路径“固化”进配置
-const systemDirs = reactive({ photoDir: '', scanDir: '', ocrDir: '' })
+const systemDirs = reactive({ photoDir: '', scanDir: '', ocrDir: '', pdfOutDir: '' })
 
 const ctxSize = ref(32768)
 const pdfRenderDpi = ref(288)
@@ -264,6 +272,7 @@ watch(open, async (v) => {
   photoDir.value = store.settings.photoDir || dirs.photoDir || ''
   scanDir.value = store.settings.scanDir || dirs.scanDir || ''
   ocrDir.value = store.settings.ocrDir || dirs.ocrDir || ''
+  pdfOutDir.value = store.settings.pdfOutDir || dirs.pdfOutDir || ''
   loadLogs()
 })
 
@@ -278,6 +287,10 @@ async function pickScanDir() {
 async function pickOcrDir() {
   const dir = await window.api.chooseDirectory()
   if (dir) ocrDir.value = dir
+}
+async function pickPdfOutDir() {
+  const dir = await window.api.chooseDirectory()
+  if (dir) pdfOutDir.value = dir
 }
 
 const backendDesc = computed(() => {
@@ -350,6 +363,7 @@ async function saveAll() {
       photoDir: normDir(photoDir.value, 'photoDir'),
       scanDir: normDir(scanDir.value, 'scanDir'),
       ocrDir: normDir(ocrDir.value, 'ocrDir'),
+      pdfOutDir: normDir(pdfOutDir.value, 'pdfOutDir'),
       defaults: { ...d },
     })
     store.settings = merged
@@ -365,7 +379,7 @@ async function restoreDefaults() {
     apiUrl: null, timeout: null, device: null, paddleDevice: null,
     keepServicesAfterQuit: null, rememberLastModule: null,
     ctxSize: null, pdfRenderDpi: null, noCudaGraph: null, maxParallel: null,
-    precision: null, photoDir: null, scanDir: null, ocrDir: null,
+    precision: null, photoDir: null, scanDir: null, ocrDir: null, pdfOutDir: null,
     defaults: null,
   })
   // 重新拉取干净的默认设置（避免恢复后内存态残留 null）
@@ -376,6 +390,7 @@ async function restoreDefaults() {
   photoDir.value = merged.photoDir || dirs.photoDir || ''
   scanDir.value = merged.scanDir || dirs.scanDir || ''
   ocrDir.value = merged.ocrDir || dirs.ocrDir || ''
+  pdfOutDir.value = merged.pdfOutDir || dirs.pdfOutDir || ''
   ElMessage.success('已恢复默认设置')
 }
 </script>

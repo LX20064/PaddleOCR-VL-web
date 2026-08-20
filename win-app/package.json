@@ -38,6 +38,7 @@
     "productName": "PaddleOCR-VL 扫描",
     "electronDist": "node_modules/electron/dist",
     "asar": true,
+    "afterPack": "scripts/applyIcon.js",
     "asarUnpack": [
       "node_modules/koffi/**/*"
     ],
@@ -72,6 +73,7 @@
     ],
     "win": {
       "icon": "build/icon.ico",
+      "signAndEditExecutable": false,
       "target": [
         {
           "target": "nsis",
@@ -91,6 +93,7 @@
     "nsis": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
+      "deleteAppDataOnUninstall": true,
       "warningsAsErrors": false,
       "createDesktopShortcut": true,
       "shortcutName": "PaddleOCR-VL 扫描",

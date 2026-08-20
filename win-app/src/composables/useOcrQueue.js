@@ -10,7 +10,7 @@ export function useOcrQueue() {
   // 自动扫描：勾选仅作为「识别完成后自动按勾选格式保存」的设置项，
   // 不再自动触发识别——识别统一由「批量识别」按钮（或获取页/摄像头经 ocrInbox 入队）开始。
   const autoScan = ref(false)
-  const autoFormats = ref(['docx'])   // 自动保存格式：docx / html / json / zip_md
+  const autoFormats = ref([])        // 自动保存格式：docx / html / json / zip_md（默认不勾选，需用户手动选择）
 
   // 自动保存格式必须至少勾选一种：全部取消勾选时自动退回手动模式，
   // 避免「自动扫描开启但无任何格式可保存」的空转状态。
@@ -215,6 +215,10 @@ export function useOcrQueue() {
       const initial = queue.filter((x) => x.status === 'wait').length
       if (!initial) return
       log(`▶ 开始批量识别，共 ${initial} 个文件（并发 ${maxP}）`)
+      // 自动保存状态提示：开启时提醒用户结果将自动按勾选格式落盘（具体路径见各条导出日志）
+      if (autoScan.value && autoFormats.value.length) {
+        log(`ⓘ 自动保存已开启：识别完成将自动导出 ${autoFormats.value.join('、')} 到 OCR 结果目录`)
+      }
       let done = 0
       // worker 池：启动 maxP 个 worker 各自循环领取 wait 项。相比「整批屏障」，
       // 单个大文件不会阻塞其他槽位空转，识别期间新加入的文件也会被立即拾取续跑。
@@ -226,10 +230,14 @@ export function useOcrQueue() {
             const ok = await runOne(it)
             if (ok) {
               done++
-              await loadImagesFor(it)
-              // 自动扫描：识别完成即按勾选格式保存（失败仅记日志，不中断批量）
+              // 原图预览加载失败不得阻断自动保存：预览只是附加功能，识别结果已缓存，
+              // 预览出错仅记日志（否则异常会被下方 catch 吞掉，导致自动保存被跳过且无提示）。
+              try { await loadImagesFor(it) } catch (e) {
+                log(`⚠ ${it.name}：原图预览加载失败（不影响识别与自动保存）：${e.message}`)
+              }
+              // 自动扫描：识别完成即按勾选格式保存（失败会弹提示并记日志，不中断批量）
               if (autoScan.value && autoFormats.value.length) {
-                for (const f of autoFormats.value) await exportFor(it, f)
+                for (const f of autoFormats.value) await exportFor(it, f, { auto: true })
               }
             }
           } catch (e) {
@@ -271,7 +279,7 @@ export function useOcrQueue() {
   // 按队列项导出指定格式（优先复用已识别的 md/images，避免重新跑 VLM 识别）。
   // 手动导出与自动扫描共用：成功返回 {ok:true,download,status}，失败返回 {ok:false,error}，
   // 不抛异常（自动保存时失败仅记日志，不打断批量流程）。
-  async function exportFor(it, mode) {
+  async function exportFor(it, mode, { auto = false } = {}) {
     if (!it) return null
     const c = store.results[it.path]
     try {
@@ -293,10 +301,14 @@ export function useOcrQueue() {
       if (!res.ok) throw new Error(res.error)
       it.download = res.download
       if (c) c.download = res.download
-      log(`✔ 已导出 ${mode}：${res.status}`)
+      // 日志带上完整输出路径：避免「识别成功但不知道结果保存在哪」的困惑
+      log(`✔ 已导出 ${mode}：${res.status} → ${res.download}`)
       return { ok: true, download: res.download, status: res.status }
     } catch (e) {
-      log(`✖ 导出 ${mode} 失败：${e.message}`)
+      const msg = `✖ 导出 ${mode} 失败：${e.message}`
+      log(msg)
+      // 自动保存失败必须让用户看到（之前只进日志面板，容易忽略，误以为「没导出」）
+      if (auto) ElMessage.error(`自动保存 ${mode} 失败：${e.message}`)
       return { ok: false, error: e.message }
     }
   }

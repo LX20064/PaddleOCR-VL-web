@@ -281,6 +281,28 @@ def _add_chart_crops(zf, chart_crops):
         zf.writestr(f"charts/{name}", data)
 
 
+# ---------- 导出打包辅助 ----------
+# 各导出模式对应的压缩包后缀（用户要求：按导出方式区分后缀）
+MODE_SUFFIX = {"docx": "Word", "html": "HTML", "json": "JSON", "zip_md": "Markdown"}
+
+
+def _write_images_zip(zf, images, prefix="images"):
+    """把识别结果图片写入 zip 的 <prefix>/ 目录下（保留原始相对路径）。"""
+    for rel, b64 in images.items():
+        name = rel.replace("\\", "/").lstrip("/")
+        if name:
+            zf.writestr(f"{prefix}/{name}", base64.b64decode(b64))
+
+
+def _rewrite_md_image_refs(md, images, prefix="images/"):
+    """把 md 中的图片引用改写为 zip 内 <prefix> 下的路径（图片已归入文件夹）。"""
+    for rel in images:
+        safe = rel.replace("\\", "/").lstrip("/")
+        if safe:
+            md = md.replace(rel, prefix + safe)
+    return md
+
+
 # ---------- 主流程 ----------
 def build_payload(path, file_type, p, req):
     """与 web_ocr._parse_core 相同的请求构造。p 为渲染进程传入的参数 dict。"""
@@ -372,9 +394,6 @@ def main_render():
         except Exception as e:
             fail(f"生成 Word 失败：{e}")
 
-    md_path = out_dir / f"{stem}.md"
-    md_path.write_text(full_md, encoding="utf-8")
-
     if mode == "docx" and docx_path:
         elapsed = time.time() - t0
         emit({"t": "result", "ok": True,
@@ -384,11 +403,9 @@ def main_render():
         return
 
     if mode in ("html", "json", "zip_md"):
-        zip_path = out_dir / f"{stem}_解析结果.zip"
+        suffix = MODE_SUFFIX[mode]
+        zip_path = out_dir / f"{stem}_{suffix}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(f"{stem}.md", full_md)
-            for rel, b64 in images.items():
-                zf.writestr(rel, base64.b64decode(b64))
             if mode == "html":
                 html_content = _md_to_html(full_md, images)
                 if html_content:
@@ -400,10 +417,13 @@ def main_render():
                     fail("JSON 导出需要缓存的结构化结果（prunedResults），请先重新识别一次。")
                 json_text = json.dumps(pruned_results, ensure_ascii=False, indent=2)
                 zf.writestr(f"{stem}.json", json_text)
-        labels = {"html": "HTML", "json": "JSON", "zip_md": "Markdown"}
+            elif mode == "zip_md":
+                zf.writestr(f"{stem}.md", _rewrite_md_image_refs(full_md, images))
+            if images:
+                _write_images_zip(zf, images)
         elapsed = time.time() - t0
         emit({"t": "result", "ok": True,
-              "status": f"已导出 {labels[mode]} 结果包：耗时 {elapsed:.1f} 秒",
+              "status": f"已导出 {suffix} 结果包：耗时 {elapsed:.1f} 秒",
               "md": full_md, "images": images, "download": str(zip_path),
               "pages": 1, "elapsed": round(elapsed, 1)})
         return
@@ -540,11 +560,7 @@ def main():
                 docx_path = None
                 progress(0.85, f"Word 生成失败（{e}），已跳过 Word 导出")
 
-        md_path = out_dir / f"{stem}.md"
-        md_path.write_text(full_md, encoding="utf-8")
         json_text = json.dumps([pg.get("prunedResult") for pg in pages], ensure_ascii=False, indent=2)
-        json_path = out_dir / f"{stem}.json"
-        json_path.write_text(json_text, encoding="utf-8")
 
         elapsed = time.time() - t0
         if mode == "docx":
@@ -564,11 +580,9 @@ def main():
                   "pages": len(pages), "elapsed": round(elapsed, 1), "prunedResults": pruned_results})
             return
         if mode in ("html", "json", "zip_md"):
-            zip_path = out_dir / f"{stem}_解析结果.zip"
+            suffix = MODE_SUFFIX[mode]
+            zip_path = out_dir / f"{stem}_{suffix}.zip"
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-                zf.writestr(f"{stem}.md", full_md)
-                for rel, b64 in merged_images.items():
-                    zf.writestr(rel, base64.b64decode(b64))
                 if mode == "html":
                     html_content = _md_to_html(full_md, merged_images)
                     if html_content:
@@ -577,10 +591,13 @@ def main():
                         fail("HTML 导出失败：缺少依赖（markdown/bs4/latex2mathml/wordrender）。")
                 elif mode == "json":
                     zf.writestr(f"{stem}.json", json_text)
+                elif mode == "zip_md":
+                    zf.writestr(f"{stem}.md", _rewrite_md_image_refs(full_md, merged_images))
+                if merged_images:
+                    _write_images_zip(zf, merged_images)
                 _add_chart_crops(zf, chart_crops)
-            labels = {"html": "HTML", "json": "JSON", "zip_md": "Markdown"}
             emit({"t": "result", "ok": True,
-                  "status": f"已导出 {labels[mode]} 结果包：共 {len(pages)} 页，耗时 {elapsed:.1f} 秒",
+                  "status": f"已导出 {suffix} 结果包：共 {len(pages)} 页，耗时 {elapsed:.1f} 秒",
                   "md": full_md, "images": merged_images, "download": str(zip_path),
                   "pages": len(pages), "elapsed": round(elapsed, 1), "prunedResults": pruned_results})
             return
@@ -624,7 +641,8 @@ def main():
 
     if per_page and len(pages) > 1:
         progress(0.9, "按页拆分结果…")
-        zip_path = out_dir / f"{stem}_每页结果.zip"
+        suffix = MODE_SUFFIX.get(mode, "")
+        zip_path = out_dir / (f"{stem}_{suffix}每页.zip" if suffix else f"{stem}_每页结果.zip")
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
             for i, pg in enumerate(pages, 1):
                 md = pg.get("markdown") or {}
@@ -633,8 +651,7 @@ def main():
                 pruned = pg.get("prunedResult")
                 tag = f"page_{i:02d}"
                 for rel, b64 in imgs.items():
-                    zf.writestr(f"{tag}/{rel}", base64.b64decode(b64))
-                zf.writestr(f"{tag}/{stem}_{i:02d}.md", text)
+                    zf.writestr(f"{tag}/images/{rel}", base64.b64decode(b64))
                 if mode == "docx":
                     docx_path = out_dir / f"{tag}_{stem}.docx"
                     try:
@@ -650,27 +667,24 @@ def main():
                         fail("HTML 导出失败：缺少依赖（markdown/bs4/latex2mathml/wordrender）。")
                 elif mode == "json":
                     zf.writestr(f"{tag}/{stem}_{i:02d}.json", json.dumps(pruned, ensure_ascii=False, indent=2))
+                elif mode == "zip_md":
+                    zf.writestr(f"{tag}/{stem}_{i:02d}.md", _rewrite_md_image_refs(text, imgs))
             _add_chart_crops(zf, chart_crops)
-        labels = {"docx": "Word", "html": "HTML", "json": "JSON", "zip_md": "Markdown"}
         emit({"t": "result", "ok": True,
-              "status": f"已按页导出 {labels.get(mode, '')}：共 {len(pages)} 页，耗时 {elapsed:.1f} 秒",
+              "status": f"已按页导出 {suffix}：共 {len(pages)} 页，耗时 {elapsed:.1f} 秒",
               "md": full_md, "images": images, "download": str(zip_path),
               "pages": len(pages), "elapsed": round(elapsed, 1), "prunedResults": pruned_results})
         return
 
     # 单文件：docx / 各格式 zip
     docx_path = out_dir / f"{stem}.docx"
-    try:
-        _md_to_docx_python(full_md, images, str(docx_path))
-    except Exception as e:
-        docx_path = None
-        progress(0.85, f"Word 生成失败（{e}），仅导出其他格式")
-    md_path = out_dir / f"{stem}.md"
-    md_path.write_text(full_md, encoding="utf-8")
-    json_path = out_dir / f"{stem}.json"
-    json_path.write_text(json_text, encoding="utf-8")
+    if mode == "docx":
+        try:
+            _md_to_docx_python(full_md, images, str(docx_path))
+        except Exception as e:
+            fail(f"生成 Word 失败：{e}")
 
-    if mode == "docx" and docx_path:
+    if mode == "docx":
         if export_chart and chart_crops:
             zip_path = out_dir / f"{stem}_Word及图表.zip"
             with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
@@ -687,11 +701,9 @@ def main():
               "pages": len(pages), "elapsed": round(elapsed, 1), "prunedResults": pruned_results})
         return
     if mode in ("html", "json", "zip_md"):
-        zip_path = out_dir / f"{stem}_解析结果.zip"
+        suffix = MODE_SUFFIX[mode]
+        zip_path = out_dir / f"{stem}_{suffix}.zip"
         with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
-            zf.writestr(f"{stem}.md", full_md)
-            for rel, b64 in images.items():
-                zf.writestr(rel, base64.b64decode(b64))
             if mode == "html":
                 html_content = _md_to_html(full_md, images)
                 if html_content:
@@ -700,10 +712,13 @@ def main():
                     fail("HTML 导出失败：缺少依赖（markdown/bs4/latex2mathml/wordrender）。")
             elif mode == "json":
                 zf.writestr(f"{stem}.json", json_text)
+            elif mode == "zip_md":
+                zf.writestr(f"{stem}.md", _rewrite_md_image_refs(full_md, images))
+            if images:
+                _write_images_zip(zf, images)
             _add_chart_crops(zf, chart_crops)
-        labels = {"html": "HTML", "json": "JSON", "zip_md": "Markdown"}
         emit({"t": "result", "ok": True,
-              "status": f"已导出 {labels[mode]} 结果包：1 页，耗时 {elapsed:.1f} 秒",
+              "status": f"已导出 {suffix} 结果包：1 页，耗时 {elapsed:.1f} 秒",
               "md": full_md, "images": images, "download": str(zip_path),
               "pages": len(pages), "elapsed": round(elapsed, 1), "prunedResults": pruned_results})
         return

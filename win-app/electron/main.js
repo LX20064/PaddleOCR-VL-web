@@ -65,6 +65,7 @@ const DEFAULT_SETTINGS = {
   photoDir: '',                     // 图片：图片库/本机照片
   scanDir: '',                      // 扫描结果：文档/已扫描的文档
   ocrDir: '',                       // OCR 输出：文档/OCR扫描结果
+  pdfOutDir: '',                    // 图片转 PDF 输出：文档/PDF输出
   // 识别参数默认值（直接映射产线 /layout-parsing 字段，None=后端默认）
   defaults: {
     use_seal: false,
@@ -181,6 +182,11 @@ function defaultScanDir() {
 function defaultOcrDir() {
   const s = readSettings()
   const d = s.ocrDir || path.join(app.getPath('documents'), 'OCR扫描结果')
+  return ensureDir(d)
+}
+function defaultPdfDir() {
+  const s = readSettings()
+  const d = s.pdfOutDir || path.join(app.getPath('documents'), 'PDF输出')
   return ensureDir(d)
 }
 
@@ -383,8 +389,21 @@ ipcMain.handle('sys:default-dirs', () => ({
   photoDir: defaultPhotoDir(),
   scanDir: defaultScanDir(),
   ocrDir: defaultOcrDir(),
+  pdfOutDir: defaultPdfDir(),
 }))
 ipcMain.handle('sys:reveal', (_e, p) => { if (p) shell.showItemInFolder(String(p)) })
+// 在系统文件浏览器中打开目录（跨平台：shell.openPath 对 Windows / macOS / Linux 均可用）。
+// 目录不存在时先创建再打开，返回结构化结果便于前端提示。
+ipcMain.handle('sys:open-dir', async (_e, dir) => {
+  if (!dir || typeof dir !== 'string') return { ok: false, error: '未指定目录' }
+  try {
+    if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true })
+    const err = await shell.openPath(dir)
+    return err ? { ok: false, error: err } : { ok: true }
+  } catch (e) {
+    return { ok: false, error: e.message }
+  }
+})
 ipcMain.handle('sys:open-external', (_e, url) => {
   // 仅放行 http/https 外链，避免渲染进程传 file:// 等协议打开本地程序
   if (url && /^https?:\/\//i.test(String(url))) shell.openExternal(String(url))
@@ -437,11 +456,19 @@ ipcMain.handle('fs:list-files', (_e, dir, recursive) => {
 
 // 图片 → base64 data URI（渲染进程无法直接读本地文件）
 const MIME_BY_EXT = { '.png': 'image/png', '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.webp': 'image/webp', '.bmp': 'image/bmp', '.tif': 'image/tiff', '.tiff': 'image/tiff' }
-ipcMain.handle('img:data', (_e, p) => {
+ipcMain.handle('img:data', async (_e, p) => {
   try {
-    const buf = fs.readFileSync(String(p))
-    const ext = path.extname(String(p)).toLowerCase()
-    const mime = MIME_BY_EXT[ext] || 'image/png'
+    let file = String(p)
+    const ext = path.extname(file).toLowerCase()
+    // 浏览器 <img> 不支持 TIFF：先用 PIL 转成 PNG 再返回，否则大图/缩略图会破图
+    if (ext === '.tif' || ext === '.tiff') {
+      const tmp = path.join(app.getPath('temp'), `paddleocr_tif2png_${Date.now()}.png`)
+      const r = await runPython([path.join(pyScriptsDir, 'image_tool.py'), '--in', file, '--convert', 'png', '--out', tmp, '--ops', '-'], { stdin: JSON.stringify([]) })
+      if (!r.ok) return null
+      file = tmp
+    }
+    const buf = fs.readFileSync(file)
+    const mime = MIME_BY_EXT[path.extname(file).toLowerCase()] || 'image/png'
     return `data:${mime};base64,${buf.toString('base64')}`
   } catch (e) { return null }
 })
@@ -486,11 +513,13 @@ ipcMain.handle('export:render', async (_e, req) => {
   })
 })
 
-ipcMain.handle('scan:pdf-preview', async (_e, pdfPath) => {
+ipcMain.handle('scan:pdf-preview', async (_e, pdfPath, maxPages) => {
   // 预览图写入系统临时目录（paddleocr_preview_ 前缀），退出时统一清理，避免在 PDF 旁残留 .pdf_preview
   const previewDir = path.join(os.tmpdir(), `paddleocr_preview_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`)
-  const p = runPython([path.join(pyScriptsDir, 'pdf_preview.py'), pdfPath, previewDir])
-  return p.then((r) => r)
+  const args = [path.join(pyScriptsDir, 'pdf_preview.py'), pdfPath, previewDir]
+  // 可选 --max-pages N：只渲染前 N 页（大图预览仅需首页，避免整本 PDF 全量渲染）
+  if (maxPages) args.push('--max-pages', String(maxPages))
+  return runPython(args)
 })
 
 // 复制文本到剪贴板（生产环境 file:// 非安全上下文下 navigator.clipboard 不可用）
@@ -589,6 +618,11 @@ ipcMain.handle('img:save-data', async (_e, opt) => {
   }
 })
 
+// 判断路径是否存在（渲染进程用于避免覆盖重名文件等场景）
+ipcMain.handle('sys:path-exists', (_e, p) => {
+  try { return !!p && fs.existsSync(String(p)) } catch (_) { return false }
+})
+
 // ---------------- IPC：保存对话框 ----------------
 ipcMain.handle('dlg:save', async (_e, opt) => {
   const r = await dialog.showSaveDialog(mainWindow, {
@@ -638,7 +672,8 @@ function cleanupTempScans() {
     const tmp = os.tmpdir()
     for (const name of fs.readdirSync(tmp)) {
       if (name.startsWith('paddleocr_scan_') || name.startsWith('paddleocr_preview_') ||
-          name.startsWith('paddleocr_imgtool_') || name.startsWith('paddleocr_cam_')) {
+          name.startsWith('paddleocr_imgtool_') || name.startsWith('paddleocr_cam_') ||
+          name.startsWith('paddleocr_tif2png_')) {
         fs.rmSync(path.join(tmp, name), { recursive: true, force: true })
       }
     }
@@ -676,6 +711,11 @@ if (!gotLock) {
   })
 
   app.whenReady().then(() => {
+    // 启动时清理上次异常退出（崩溃/强制结束）残留的临时文件：
+    // 正常退出已在 before-quit 清理；此处窗口创建前兜底清一次，避免残留长期累积。
+    // 此刻无任何 sidecar 进程运行，%TEMP%\paddleocr_* 与 outputs\.previews 均为可再生成的临时产物。
+    cleanupTempScans()
+
     // 摄像头 / 麦克风权限：允许渲染进程访问摄像头（拍照选项卡）
     const ses = session.defaultSession
     ses.setPermissionRequestHandler((_wc, permission, cb) => {

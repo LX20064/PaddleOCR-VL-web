@@ -6,6 +6,15 @@
         <el-icon style="margin-right:6px;vertical-align:-2px"><Document /></el-icon>图片 → PDF（多页合并）
       </div>
       <div class="conv-desc">按列表顺序将多张图片合并为一个 PDF 文件</div>
+      <div class="conv-opts">
+        <span class="conv-label">输出目录</span>
+        <el-input v-model="outPdfDir" size="small" placeholder="留空则在导出时选择位置" style="flex:1">
+          <template #append>
+            <el-button size="small" @click="pickPdfOut">选择</el-button>
+          </template>
+        </el-input>
+        <el-button size="small" text :disabled="!outPdfDir" @click="outPdfDir = ''">清空</el-button>
+      </div>
       <div class="conv-list" v-if="pdfList.length">
         <div v-for="(p, i) in pdfList" :key="p" class="conv-item">
           <span class="conv-idx">{{ i + 1 }}</span>
@@ -64,20 +73,32 @@
 </template>
 
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Document, Refresh, Plus } from '@element-plus/icons-vue'
-import { log } from '../store'
+import { log, store } from '../store'
 
 const pdfList = ref([])
 const srcList = ref([])
 const fmt = ref('png')
 const outDir = ref('')
+// 图片转 PDF 输出目录：留空则导出时弹窗选择位置；填写后直接落盘该目录
+const outPdfDir = ref('')
 const pdfBusy = ref(false)
 const convBusy = ref(false)
 const err1 = ref('')
 const err2 = ref('')
 const doneMsg = ref('')
+
+onMounted(() => {
+  // 初始值跟随设置里的「PDF 输出保存位置」（可为空=导出时询问）
+  outPdfDir.value = store.settings?.pdfOutDir || ''
+})
+
+async function pickPdfOut() {
+  const d = await window.api.chooseDirectory()
+  if (d) outPdfDir.value = d
+}
 
 async function pickPdf() {
   // 仅允许选择图片：merge_to_pdf 无法处理 PDF 输入
@@ -97,21 +118,32 @@ async function exportPdf() {
   if (!pdfList.value.length) return
   pdfBusy.value = true
   err1.value = ''
-  const out = await window.api.saveFile({
-    title: '导出 PDF',
-    defaultPath: 'merged.pdf',
-    filters: [{ name: 'PDF', extensions: ['pdf'] }],
-  })
-  if (out) {
-    try {
+  let out
+  try {
+    if (outPdfDir.value) {
+      // 已配置输出目录：直接落盘该目录，重名自动加序号（不覆盖已有文件）
+      const dir = outPdfDir.value.replace(/[\\/]$/, '')
+      let name = 'merged.pdf'
+      for (let n = 1; await window.api.pathExists(`${dir}\\${name}`); n++) {
+        name = n === 1 ? 'merged_1.pdf' : `merged_${n}.pdf`
+      }
+      out = `${dir}\\${name}`
+    } else {
+      out = await window.api.saveFile({
+        title: '导出 PDF',
+        defaultPath: 'merged.pdf',
+        filters: [{ name: 'PDF', extensions: ['pdf'] }],
+      })
+    }
+    if (out) {
       const r = await window.api.pdfMerge({ out, pages: pdfList.value.slice(), dpi: 300 })
       if (!r.ok) throw new Error(r.error)
       window.api.revealPath(out)
       log(`✔ PDF 已导出：${out}（${pdfList.value.length} 页）`)
       ElMessage.success(`PDF 导出完成（${pdfList.value.length} 页）`)
-    } catch (e) {
-      err1.value = e.message
     }
+  } catch (e) {
+    err1.value = e.message
   }
   pdfBusy.value = false
 }

@@ -199,7 +199,9 @@ async function doPreview() {
   previewing.value = true
   err.value = ''
   try {
-    const r = await window.api.scanPreview(deviceId.value, form.dpi)
+    // 预览固定用低分辨率（100dpi）快速出图，仅用于查看效果；
+    // 正式扫描才使用面板中选择的 form.dpi（默认 300）
+    const r = await window.api.scanPreview(deviceId.value, 100)
     if (r?.ok) previewUri.value = await window.api.imageDataUri(r.path)
     else err.value = r?.error || '预览失败'
   } catch (e) {
