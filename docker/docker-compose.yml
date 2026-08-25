@@ -1,0 +1,62 @@
+# ============================================================
+# PaddleOCR-VL 文档解析网页版 —— Docker Compose 编排
+#
+# 用法：
+#   docker compose up -d --build
+#   docker compose logs -f
+#   docker compose down
+#
+# 前置：
+#   1. 宿主机已安装 NVIDIA 驱动（>= 570，Blackwell 门槛）
+#   2. 已安装 nvidia-container-toolkit（GPU 透传必需）
+#
+# 端口：8080 API / 7860 用户网页 / 7861 管理后台
+#   （8081 为容器内部 llama-server，无需对外暴露）
+# ============================================================
+
+services:
+  paddleocr-vl:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+      args:
+        PADDLE_VERSION: "3.2.2"
+    image: paddleocr-vl:cu129
+    container_name: paddleocr-vl
+    restart: unless-stopped
+
+    ports:
+      - "8080:8080"   # PaddleX API（layout-parsing / restructure-pages）
+      - "7860:7860"   # 用户网页
+      - "7861:7861"   # 管理后台
+
+    environment:
+      # VL 模型精度：fp16 | q8_0 | q5_k_m | q4_k_m（默认 q5_k_m，8GB 显存推荐）
+      - VL_PRECISION=${VL_PRECISION:-q5_k_m}
+      # 启动前是否预下载/量化 VL 模型（首次需下载官方模型，耗时较长；置 0 可跳过）
+      - PREWARM=${PREWARM:-1}
+      - TZ=Asia/Shanghai
+      - PYTHONUNBUFFERED=1
+      # llama.cpp 动态库（libllama-server-impl.so 等）与可执行文件同目录，
+      # 镜像内二进制 rpath 指向构建期的 /workspace，运行时需显式指定
+      - LD_LIBRARY_PATH=/app/tools/llama.cpp/build-cuda/bin
+
+    volumes:
+      # 说明：GGUF 量化模型与产线子模型已内置在镜像内（构建时 COPY），
+      # 因此不再挂载 ../tools/models 与 ../tools/gguf——
+      # 若挂载宿主机目录会覆盖镜像内内置模型，导致"开箱即用"失效。
+      # 如需更新模型：重新构建镜像，或按需在容器内重跑 model_manager。
+      # 解析结果 / 日志持久化（相对本 compose 文件所在目录 docker/，即仓库根目录下的 outputs、logs）
+      - ../outputs:/app/outputs
+      - ../logs:/app/logs
+
+    # 共享内存：供 PaddlePaddle / llama 数据加载使用，避免默认 64MB 过小
+    shm_size: "2gb"
+
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]

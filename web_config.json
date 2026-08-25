@@ -1,0 +1,40 @@
+{
+  "api_url": "http://127.0.0.1:8080/layout-parsing",
+  "timeout": 600,
+  "max_parallel": 1,
+  "admin_password_sha256": "240be518fabd2724ddb6f04eeb1da5967448d7e831c08c8fa822809f74c720a9",
+  "switches": {
+    "scan_service": true,
+    "web_ui": true,
+    "mcp": true
+  },
+  "log_clean": {
+    "enabled": true,
+    "trigger_mb": 11,
+    "keep_mb": 3,
+    "interval_sec": 120
+  },
+  "defaults": {
+    "use_orientation": false,
+    "use_unwarping": false,
+    "use_seal": false,
+    "use_chart": false,
+    "use_layout_mode": true,
+    "use_merge_blocks": true,
+    "use_ocr_image_block": false,
+    "use_format_block": false,
+    "pdf_per_page": false,
+    "export_chart": false,
+    "max_pixels": 0,
+    "pdf_render_dpi": 288,
+    "ctx_len": 32768,
+    "cache_keep_days": 3,
+    "vl_precision": "fp16",
+    "layout_nms": null,
+    "layout_unclip_ratio": null,
+    "layout_merge_bboxes_mode": null,
+    "layout_shape_mode": null,
+    "vlm_extra_args": null,
+    "markdown_ignore_labels": null
+  }
+}

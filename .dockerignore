@@ -1,0 +1,61 @@
+# ============================================================
+# Docker 构建忽略清单（构建上下文 = 仓库根目录 PaddleOCR-VL/）
+# 镜像内只保留源码与运行期自动生成的东西：
+#   - llama.cpp 由 builder 阶段按多架构重新编译（不进镜像源码/旧产物）
+#   - 官方模型 / GGUF 由 model_manager 在容器运行时下载或挂载持久化
+# 注意：模式含斜杠时以上下文根为锚点，嵌套目录需用 **/ 前缀
+# ============================================================
+
+# 版本控制
+.git
+.gitignore
+
+# 大体积运行期产物（镜像内由 builder 编译 / 运行时下载）
+**/outputs/
+**/logs/
+
+# tools/ 整体排除，但保留打入镜像的模型文件：
+#   - GGUF 量化模型（tools/gguf/1.6/*.gguf）
+#   - 产线子模型在宿主 ~/.paddlex，由 Dockerfile 单独 COPY（不经构建上下文）
+#   - llama.cpp 源码/产物由 builder 阶段重新编译，不进镜像
+**/tools/llama.cpp/
+**/tools/models/
+**/tools/gguf/1.5/
+**/tools/gguf/README.md
+**/tools/gguf/chat_template_llama.jinja
+# 旧版 1.5 GGUF 模型（项目已切换到 1.6，无需打包）
+**/tools/gguf/PaddleOCR-VL-1.5-GGUF.gguf
+**/tools/gguf/PaddleOCR-VL-1.5-GGUF-mmproj.gguf
+
+# 宿主机旧版 llama.cpp 构建副本（3.2G，builder 阶段会重新编译，无需打包）
+llama.cpp-b10472/
+
+# 临时/测试目录
+_render_test/
+_scantest/
+desktop-push/
+
+# 进程 pid 文件
+*.pid
+
+# Python 缓存与虚拟环境
+**/__pycache__/
+*.pyc
+.venv
+.venv_*
+venv
+
+# 运行期自动生成的扫描图标（web_ocr.py 会自行重建）
+**/.scan_icons/
+
+# 测试图片（非运行时依赖）
+**/test_table.png
+**/test_scan.png
+
+# 备份与宿主机部署文件
+*.bak*
+**/systemd/
+
+# 其它临时文件
+*.log
+.DS_Store
