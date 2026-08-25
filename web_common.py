@@ -50,14 +50,14 @@ DEFAULT_CONFIG = {
     },
     # 用户网页各选项的【默认勾选状态】（用户仍可在页面上临时更改）
     "defaults": {
-        "use_orientation": False, # 文档方向分类
+        "use_orientation": True, # 文档方向分类
         "use_unwarping": False,   # 文本图像矫正
-        "use_seal": False,        # 印章识别
-        "use_chart": False,       # 图表解析
+        "use_seal": True,        # 印章识别
+        "use_chart": True,       # 图表解析
         "use_layout_mode": True,      # 版面分析（自动检测分栏、表格、标题、图像区域）
         "use_merge_blocks": True,     # 跨栏分栏合并（跨栏/交错文本合并为连续段落）
         "use_ocr_image_block": False, # 图像块内 OCR（对图片内嵌文字再做一次 OCR）
-        "use_format_block": False,    # 块内容格式化（表格/公式等渲染为 Markdown）
+        "use_format_block": True,    # 块内容格式化（表格/公式等渲染为 Markdown）
         "pdf_per_page": False,        # PDF 每页输出单独文件（多页 PDF 按页拆分为独立结果文件）
         "export_chart": False,        # 导出图表区域为图片（将识别出的图表区域单独导出为图片文件）
         "max_pixels": 0,          # 单图最大像素（0 = 不限制）

@@ -15,14 +15,14 @@
     "interval_sec": 120
   },
   "defaults": {
-    "use_orientation": false,
+    "use_orientation": true,
     "use_unwarping": false,
-    "use_seal": false,
-    "use_chart": false,
+    "use_seal": true,
+    "use_chart": true,
     "use_layout_mode": true,
     "use_merge_blocks": true,
     "use_ocr_image_block": false,
-    "use_format_block": false,
+    "use_format_block": true,
     "pdf_per_page": false,
     "export_chart": false,
     "max_pixels": 0,
